@@ -1,13 +1,14 @@
 {
   "name": "fcps-school-mcp",
-  "version": "1.0.1",
-  "description": "A local MCP server for FCPS Schoology and StudentVUE.",
+  "version": "1.1.0",
+  "description": "A local or self-hosted MCP server for FCPS Schoology and StudentVUE.",
   "type": "module",
   "bin": {
     "fcps-school-mcp": "src/cli.js"
   },
   "scripts": {
-    "check": "node --check src/cli.js && node --check src/config.js && node --check src/fcps.js && node --check src/server.js && node --check src/setup.js",
+    "check": "node --check api/mcp.js && node --check src/cli.js && node --check src/config.js && node --check src/deploy.js && node --check src/fcps.js && node --check src/server.js && node --check src/setup.js",
+    "deploy": "node src/cli.js deploy",
     "start": "node src/cli.js",
     "setup": "node src/cli.js setup",
     "test": "node --test"
@@ -16,7 +17,9 @@
     "node": ">=22"
   },
   "files": [
+    "api",
     "src",
+    "vercel.json",
     "README.md",
     "LICENSE"
   ],

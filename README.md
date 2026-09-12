@@ -8,23 +8,37 @@
 [![Node 22+](https://img.shields.io/badge/node-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-ready-6C47FF)](https://modelcontextprotocol.io/)
 
-Local-first · No API keys · No database · No cloud account
+Local or self-hosted · No developer keys · No shared database · No developer-operated backend
 
 </div>
 
-An unofficial, open-source [Model Context Protocol](https://modelcontextprotocol.io/) server for Fairfax County Public Schools students. It gives MCP-compatible assistants live, read-only access to Schoology courses and materials plus official grades from SIS StudentVUE.
+An unofficial, open-source [Model Context Protocol](https://modelcontextprotocol.io/) server for Fairfax County Public Schools students. It gives ChatGPT and other MCP-compatible assistants live, read-only access to Schoology courses and materials plus official grades from SIS StudentVUE.
 
-## Install in one command
+## Use with ChatGPT on the web
+
+> **One-command setup**
+>
+> You need [Node.js 22 or newer](https://nodejs.org/), an FCPS student account, a free [Vercel account](https://vercel.com/signup), and a [ChatGPT plan that supports Developer mode](https://developers.openai.com/api/docs/guides/developer-mode). Run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
+>
+> ```bash
+> npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.1.0.tar.gz fcps-school-mcp deploy
+> ```
+>
+> The command downloads the Vercel CLI, opens Vercel sign-in, privately asks for your FCPS credentials, creates a deployment in **your** Vercel account, and prints your private MCP URL. In ChatGPT, enable **Settings → Security → Developer mode**, create a new app, choose **No authentication**, and paste the URL. Keep that URL private because it contains the key to your school data.
+
+Your FCPS username, password, and URL key are sent directly to your Vercel project as Secret environment variables. They are not saved in this repository or sent to the project author. The deployment is dedicated to your account; there is no shared student database.
+
+## Use locally with a desktop AI app
 
 You need [Node.js 22 or newer](https://nodejs.org/) and an existing FCPS student account. Then run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
 
 ```bash
-npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz fcps-school-mcp setup
+npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.1.0.tar.gz fcps-school-mcp setup
 ```
 
 Enter your FCPS username and password when prompted. The setup command saves them only on your computer and automatically configures any detected copy of Claude Desktop, Cursor, or Windsurf. Restart your AI app, and `fcps-school` will appear as an MCP server.
 
-That is the entire setup. You do not need a Schoology developer key, Supabase, Vercel, Docker, or a browser session.
+That is the entire local setup. You do not need a Schoology developer key, Supabase, Vercel, Docker, or a browser session.
 
 ## What it can do
 
@@ -65,7 +79,7 @@ The setup command stores credentials even when it does not recognize your client
         "--yes",
         "--allow-remote=all",
         "--ignore-scripts",
-        "--package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz",
+        "--package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.1.0.tar.gz",
         "fcps-school-mcp"
       ]
     }
@@ -79,14 +93,15 @@ You can also skip stored credentials and provide `SCHOOLOGY_USERNAME` and `SCHOO
 
 ## Privacy and security
 
-- Runs locally over stdio. It does not open a public server or upload data to this repository.
-- Sends your credentials only to the official FCPS ForgeRock login service at `aic.fcps.edu`.
+- Local setup runs only over stdio. ChatGPT setup creates an HTTPS deployment inside your own Vercel account.
+- During use, sends your credentials only to the official FCPS ForgeRock login service at `aic.fcps.edu`; remote setup first stores them in your Vercel project as described above.
 - Makes read-only requests to official FCPS Schoology and StudentVUE services, plus Schoology's signed file CDN for requested attachments.
-- Stores credentials outside the repository in your operating system's user configuration directory. On macOS and Linux, the file is created with `0600` permissions.
+- Local setup stores credentials in your operating system's user configuration directory. On macOS and Linux, the file is created with `0600` permissions.
+- ChatGPT setup stores credentials and the URL key as Vercel Secret environment variables and never writes them into the temporary deployment files.
 - Includes no telemetry, analytics, shared database, bundled student data, or developer-controlled backend.
 - Enforces a 15-minute cooldown after a failed login to reduce the risk of an FCPS account lockout.
 
-Treat your local credential file like a password. Do not commit it, share it, or place it in a synced public folder.
+Treat your local credential file and private MCP URL like passwords. Do not commit or share them. School data returned by the MCP is provided to the AI client you connect, so review that client's privacy terms and follow your school's technology policies.
 
 ## Troubleshooting
 
@@ -106,6 +121,10 @@ The file is probably a scan or image-only PDF. OCR is not included.
 
 Delete `credentials.json` from the path printed by the setup command, then remove `fcps-school` from your MCP client config.
 
+**Remove a ChatGPT deployment**
+
+Delete the generated `fcps-school-mcp-*` project from your Vercel dashboard and remove its app from ChatGPT.
+
 ## Development
 
 ```bash
@@ -115,7 +134,7 @@ npm install
 npm test
 ```
 
-Run `npm run setup` for local configuration or `npm start` to start the stdio server.
+Run `npm run setup` for local configuration, `npm run deploy` for a private Vercel deployment, or `npm start` to start the stdio server.
 
 ## Scope and disclaimer
 
