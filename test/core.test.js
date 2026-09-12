@@ -93,7 +93,7 @@ test("deploys credentials as Vercel secrets without putting them in arguments", 
   const calls = [];
   const runner = async (args, options) => {
     calls.push({ args, options });
-    return args[0] === "deploy" ? "https://fcps-school-example.vercel.app" : "";
+    return args[0] === "deploy" ? JSON.stringify({ url: "https://fcps-school-example.vercel.app" }) : "";
   };
   const values = {
     username: "student-user",
@@ -120,6 +120,7 @@ test("deploys credentials as Vercel secrets without putting them in arguments", 
     values.password,
     values.secret,
   ]);
+  assert.deepEqual(calls[4].args, ["deploy", "--prod", "--yes", "--json"]);
   const commandArguments = calls.flatMap((call) => call.args).join(" ");
   assert.ok(!commandArguments.includes(values.username));
   assert.ok(!commandArguments.includes(values.password));

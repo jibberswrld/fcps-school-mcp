@@ -17,6 +17,15 @@ export function buildMcpUrl(deploymentUrl, secret) {
   return `${base}/api/mcp/${encodeURIComponent(secret)}`;
 }
 
+function deploymentUrl(output) {
+  try {
+    const result = JSON.parse(output);
+    const url = result?.url ?? result?.deployment?.url;
+    if (typeof url === "string") return url;
+  } catch {}
+  throw new Error("Vercel did not return a valid deployment result.");
+}
+
 export function runVercel(args, { cwd, input, captureOutput = false } = {}) {
   const executable = process.platform === "win32" ? "npx.cmd" : "npx";
   return new Promise((resolvePromise, reject) => {
@@ -47,11 +56,11 @@ export async function deployProject({ directory, projectName, username, password
   ]) {
     await runner(["env", "add", name, "production", "--sensitive"], { cwd: directory, input: value });
   }
-  const deploymentUrl = await runner(["deploy", "--prod", "--yes"], {
+  const deploymentResult = await runner(["deploy", "--prod", "--yes", "--json"], {
     cwd: directory,
     captureOutput: true,
   });
-  return buildMcpUrl(deploymentUrl, secret);
+  return buildMcpUrl(deploymentUrl(deploymentResult), secret);
 }
 
 async function copyDeploymentSource(target) {

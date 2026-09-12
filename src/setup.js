@@ -73,7 +73,7 @@ export async function mergeClientConfig(path) {
 
 export async function hiddenQuestion(prompt) {
   if (!stdin.isTTY || !stdin.setRawMode) {
-    throw new Error("This command needs an interactive terminal. You can use SCHOOLOGY_USERNAME and SCHOOLOGY_PASSWORD instead.");
+    throw new Error("This command needs an interactive terminal.");
   }
   stdout.write(prompt);
   stdin.setRawMode(true);
@@ -83,7 +83,7 @@ export async function hiddenQuestion(prompt) {
   try {
     for await (const chunk of stdin) {
       for (const character of chunk) {
-        if (character === "\u0003") throw new Error("Setup cancelled.");
+        if (character === "\u0003") throw new Error("Command cancelled.");
         if (character === "\r" || character === "\n") {
           stdout.write("\n");
           return value;
