@@ -143,6 +143,11 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
     body: JSON.stringify(body),
   });
+  const readMcpResponse = async (response) => {
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data: "));
+    return JSON.parse(data ? data.slice(6) : text);
+  };
 
   try {
     const blocked = await fetch(`http://127.0.0.1:${port}/api/mcp?key=wrong`);
@@ -159,11 +164,11 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
       },
     });
     assert.equal(initialized.status, 200);
-    assert.equal((await initialized.json()).result.serverInfo.name, "fcps-school");
+    assert.equal((await readMcpResponse(initialized)).result.serverInfo.name, "fcps-school");
 
     const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     assert.equal(listed.status, 200);
-    assert.equal((await listed.json()).result.tools.length, 11);
+    assert.equal((await readMcpResponse(listed)).result.tools.length, 11);
   } finally {
     await new Promise((resolvePromise) => httpServer.close(resolvePromise));
     if (previousSecret == null) delete process.env.MCP_SECRET;

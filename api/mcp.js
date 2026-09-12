@@ -45,10 +45,8 @@ export default async function handler(request, response) {
   const server = createServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
-    enableJsonResponse: true,
   });
   response.on("close", () => {
-    void transport.close();
     void server.close();
   });
 
