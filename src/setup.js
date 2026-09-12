@@ -102,16 +102,10 @@ export async function hiddenQuestion(prompt) {
   return value;
 }
 
-export async function runSetup() {
-  stdout.write("\nFCPS School MCP setup\n\nCredentials stay on this computer and are only sent to official FCPS login services.\n\n");
-  const reader = createInterface({ input: stdin, output: stdout });
-  const username = (await reader.question("FCPS username: ")).trim();
-  reader.close();
-  const password = await hiddenQuestion("FCPS password: ");
+export async function configureLocal(username, password, availableClients = candidates()) {
   const savedAt = await saveCredentials(username, password);
-
   const detected = [];
-  for (const client of candidates()) {
+  for (const client of availableClients) {
     if (await parentExists(client.path)) {
       await mergeClientConfig(client.path);
       detected.push(client.name);
@@ -125,4 +119,15 @@ export async function runSetup() {
     stdout.write("No supported desktop client was detected. Add this MCP server command to your client:\n\n");
     stdout.write(`${JSON.stringify(commandConfig(), null, 2)}\n\n`);
   }
+
+  return { savedAt, detected };
+}
+
+export async function runSetup() {
+  stdout.write("\nFCPS School MCP setup\n\nCredentials stay on this computer and are only sent to official FCPS login services.\n\n");
+  const reader = createInterface({ input: stdin, output: stdout });
+  const username = (await reader.question("FCPS username: ")).trim();
+  reader.close();
+  const password = await hiddenQuestion("FCPS password: ");
+  await configureLocal(username, password);
 }

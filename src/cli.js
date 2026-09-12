@@ -11,7 +11,7 @@ if (command === "deploy") {
 } else if (command === "setup") {
   await runSetup();
 } else if (command === "--help" || command === "-h" || command === "help") {
-  process.stdout.write(`fcps-school-mcp\n\nCommands:\n  deploy   Deploy a private copy to Vercel for ChatGPT\n  setup    Save credentials and configure detected desktop clients\n  help     Show this help\n\nWith no command, starts the MCP server over stdio.\n`);
+  process.stdout.write(`fcps-school-mcp\n\nCommands:\n  deploy   Set up local clients and a private remote MCP on Vercel\n  setup    Save credentials and configure detected desktop clients\n  help     Show this help\n\nWith no command, starts the MCP server over stdio.\n`);
 } else if (command) {
   process.stderr.write(`Unknown command: ${command}\nRun fcps-school-mcp --help for usage.\n`);
   process.exitCode = 1;
