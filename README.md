@@ -47,6 +47,7 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 ## What it can do
 
 - Show current StudentVUE grades, percentages, categories, and assignment scores.
+- Report whether each Schoology assignment has been submitted, when, and whether it was late.
 - Merge official StudentVUE scores into Schoology course and assignment results.
 - List Schoology courses, assignments, due dates, calendar events, and announcements.
 - Browse nested course-material folders, pages, documents, and assignment attachments.
@@ -60,7 +61,7 @@ The latest assignment-attachment and document-reading behavior from the live MCP
 | --- | --- |
 | `schoology_get_profile` | Signed-in Schoology profile |
 | `schoology_list_sections` | Courses with official StudentVUE grades |
-| `schoology_get_assignments` | Assignments, attachments, and matched scores |
+| `schoology_get_assignments` | Assignments, submission status, attachments, and matched scores |
 | `schoology_get_materials` | Course folders, pages, files, and assignments |
 | `schoology_read_document` | Text from documents and assignment attachments |
 | `schoology_get_upcoming_events` | Upcoming deadlines and events |
@@ -69,6 +70,14 @@ The latest assignment-attachment and document-reading behavior from the live MCP
 | `schoology_get_section_updates` | Updates for one course |
 | `studentvue_get_grades` | Official current course marks and percentages |
 | `studentvue_get_assignments` | Official assignment grades and category weights |
+
+## Submission status
+
+Every assignment from `schoology_get_assignments` carries a `submission` object:
+
+- `platform: "schoology"` — a normal Schoology dropbox assignment. `status` is `submitted` (with `submittedAt`, `late`, `revisions`, and the submitted file names) or `not_submitted`.
+- `platform: "external_tool"` — the work is turned in inside an embedded tool such as Google Assignments. Schoology never records that turn-in, so `status` stays `unknown` until a grade appears.
+- `platform: "assessment_v2"` — a Schoology assessment. Its attempt state is not exposed by the API, so `status` is `unknown`.
 
 ## Manual setup for another local MCP client
 
