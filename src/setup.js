@@ -6,11 +6,11 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { saveCredentials } from "./config.js";
 
-const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.0.tar.gz";
+const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz";
 const SERVER_NAME = "fcps-school";
 
 function commandConfig() {
-  const args = ["--yes", `--package=${PACKAGE_SPEC}`, "fcps-school-mcp"];
+  const args = ["--yes", "--allow-remote=all", "--ignore-scripts", `--package=${PACKAGE_SPEC}`, "fcps-school-mcp"];
   if (process.platform === "win32") {
     return { command: "cmd", args: ["/c", "npx", ...args] };
   }

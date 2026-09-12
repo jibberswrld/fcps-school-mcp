@@ -1,6 +1,6 @@
 {
   "name": "fcps-school-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A local MCP server for FCPS Schoology and StudentVUE.",
   "type": "module",
   "bin": {

@@ -19,7 +19,7 @@ An unofficial, open-source [Model Context Protocol](https://modelcontextprotocol
 You need [Node.js 22 or newer](https://nodejs.org/) and an existing FCPS student account. Then run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
 
 ```bash
-npx --yes --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.0.tar.gz fcps-school-mcp setup
+npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz fcps-school-mcp setup
 ```
 
 Enter your FCPS username and password when prompted. The setup command saves them only on your computer and automatically configures any detected copy of Claude Desktop, Cursor, or Windsurf. Restart your AI app, and `fcps-school` will appear as an MCP server.
@@ -63,7 +63,9 @@ The setup command stores credentials even when it does not recognize your client
       "command": "npx",
       "args": [
         "--yes",
-        "--package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.0.tar.gz",
+        "--allow-remote=all",
+        "--ignore-scripts",
+        "--package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz",
         "fcps-school-mcp"
       ]
     }
