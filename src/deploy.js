@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { hiddenQuestion } from "./setup.js";
+import { configureLocal, hiddenQuestion } from "./setup.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VERCEL_PACKAGE = "vercel@59.16.0";
@@ -75,9 +75,9 @@ async function copyDeploymentSource(target) {
 export async function runDeploy() {
   if (!stdin.isTTY) throw new Error("Deployment needs an interactive terminal.");
 
-  stdout.write("\nFCPS School MCP — deploy for ChatGPT\n\n");
-  stdout.write("This installs the Vercel CLI, opens Vercel sign-in, and creates a private deployment in your account.\n");
-  stdout.write("Your FCPS credentials will be stored as Secret environment variables in that Vercel project.\n\n");
+  stdout.write("\nFCPS School MCP — local + remote setup\n\n");
+  stdout.write("This configures supported apps on this computer, installs the Vercel CLI, and creates a private remote MCP in your account.\n");
+  stdout.write("Your FCPS credentials will be saved locally and stored as Secret environment variables in that Vercel project.\n\n");
   await runVercel(["login"]);
 
   const reader = createInterface({ input: stdin, output: stdout });
@@ -85,6 +85,9 @@ export async function runDeploy() {
   reader.close();
   const password = await hiddenQuestion("FCPS password: ");
   if (!username || !password) throw new Error("Both username and password are required.");
+
+  stdout.write("\nSetting up local MCP access...\n");
+  await configureLocal(username, password);
 
   const secret = randomBytes(24).toString("base64url");
   const projectName = `fcps-school-mcp-${randomBytes(4).toString("hex")}`;
@@ -96,7 +99,8 @@ export async function runDeploy() {
     const mcpUrl = await deployProject({ directory, projectName, username, password, secret });
     stdout.write("\nDeployment complete. Keep this URL private:\n\n");
     stdout.write(`${mcpUrl}\n\n`);
-    stdout.write("In ChatGPT: enable Developer mode in Settings → Security, create a new app, choose No authentication, and paste this URL.\n\n");
+    stdout.write("Paste this URL into any AI app that supports a custom remote MCP URL. Choose Streamable HTTP and No authentication if prompted.\n");
+    stdout.write("In ChatGPT: enable Developer mode in Settings → Security, create a new app, choose No authentication, and paste the URL.\n\n");
     return mcpUrl;
   } finally {
     await rm(directory, { recursive: true, force: true });

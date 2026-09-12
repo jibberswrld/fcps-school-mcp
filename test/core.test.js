@@ -7,11 +7,11 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import remoteHandler from "../api/mcp.js";
-import { credentialsPath, loadCredentials, saveCredentials } from "../src/config.js";
+import { credentialsPath, loadCredentials } from "../src/config.js";
 import { buildMcpUrl, deployProject } from "../src/deploy.js";
 import { TOOLS, validateToolCall } from "../src/fcps.js";
 import { createServer } from "../src/server.js";
-import { mergeClientConfig } from "../src/setup.js";
+import { configureLocal, mergeClientConfig } from "../src/setup.js";
 
 test("exports the complete Schoology and StudentVUE tool set", () => {
   assert.equal(TOOLS.length, 11);
@@ -56,14 +56,14 @@ test("validates untrusted tool arguments", () => {
   );
 });
 
-test("saves credentials outside the repository and reads them back", async () => {
+test("local setup saves credentials outside the repository and reads them back", async () => {
   const configDirectory = await mkdtemp(join(tmpdir(), "fcps-school-mcp-test-"));
   process.env.FCPS_SCHOOL_MCP_CONFIG_DIR = configDirectory;
   delete process.env.SCHOOLOGY_USERNAME;
   delete process.env.SCHOOLOGY_PASSWORD;
 
   const sampleValue = ["test", "value", "only"].join("-");
-  await saveCredentials("student", sampleValue);
+  await configureLocal("student", sampleValue, []);
   const loaded = await loadCredentials();
   assert.equal(loaded.username, "student");
   assert.equal(loaded.password, sampleValue);
