@@ -5,7 +5,7 @@ import { callTool, TOOLS } from "./fcps.js";
 
 export function createServer() {
   const server = new Server(
-    { name: "fcps-school", version: "1.0.0" },
+    { name: "fcps-school", version: "1.1.0" },
     {
       capabilities: { tools: {} },
       instructions:
