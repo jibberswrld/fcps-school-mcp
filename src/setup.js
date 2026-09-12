@@ -6,7 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { saveCredentials } from "./config.js";
 
-const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.0.1.tar.gz";
+const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.1.0.tar.gz";
 const SERVER_NAME = "fcps-school";
 
 function commandConfig() {
@@ -71,9 +71,9 @@ export async function mergeClientConfig(path) {
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function hiddenQuestion(prompt) {
+export async function hiddenQuestion(prompt) {
   if (!stdin.isTTY || !stdin.setRawMode) {
-    throw new Error("Setup needs an interactive terminal. You can use SCHOOLOGY_USERNAME and SCHOOLOGY_PASSWORD instead.");
+    throw new Error("This command needs an interactive terminal.");
   }
   stdout.write(prompt);
   stdin.setRawMode(true);
@@ -83,7 +83,7 @@ async function hiddenQuestion(prompt) {
   try {
     for await (const chunk of stdin) {
       for (const character of chunk) {
-        if (character === "\u0003") throw new Error("Setup cancelled.");
+        if (character === "\u0003") throw new Error("Command cancelled.");
         if (character === "\r" || character === "\n") {
           stdout.write("\n");
           return value;
