@@ -31,6 +31,11 @@ test("completes an MCP handshake and lists tools", async () => {
   await server.close();
 });
 
+test("describes submission status on the assignments tool", () => {
+  const tool = TOOLS.find((item) => item.name === "schoology_get_assignments");
+  assert.match(tool.description, /submission status/);
+});
+
 test("validates untrusted tool arguments", () => {
   assert.deepEqual(validateToolCall("schoology_get_upcoming_events", {}), { days: 30 });
   assert.deepEqual(validateToolCall("schoology_get_materials", { sectionId: "12345" }), { sectionId: "12345" });

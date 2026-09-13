@@ -42,8 +42,14 @@ function storeCookies(res, url) {
     if (source.hostname !== domain && !source.hostname.endsWith("." + domain)) continue;
     const path = pathPart?.slice(5) || "/";
     const secure = parts.some((part) => /^secure$/i.test(part));
-    const ex = S.jar.find((c) => c.domain === domain && c.path === path && c.name === name);
-    if (ex) Object.assign(ex, { value, secure }); else S.jar.push({ domain, path, secure, name, value });
+    const maxAge = parts.find((part) => /^max-age=/i.test(part));
+    const expires = parts.find((part) => /^expires=/i.test(part));
+    // Schoology clears cookies by re-setting them with a past expiry (value "deleted").
+    // Keeping those would send e.g. login_landing_dest=deleted, which makes /assignment/<id> redirect to /deleted.
+    const expired = maxAge ? Number(maxAge.slice(8)) <= 0 : expires ? new Date(expires.slice(8)).getTime() <= Date.now() : false;
+    const index = S.jar.findIndex((c) => c.domain === domain && c.path === path && c.name === name);
+    if (expired) { if (index >= 0) S.jar.splice(index, 1); continue; }
+    if (index >= 0) Object.assign(S.jar[index], { value, secure }); else S.jar.push({ domain, path, secure, name, value });
   }
 }
 async function raw(url, init = {}) {
@@ -215,6 +221,31 @@ async function getCalendar(startISO, endISO) {
 const normUpdates = (raw) => (raw ?? []).map((u) => ({ id: u.id, realm: u.realm, authorUid: u.uid, created: new Date((u.created || 0) * 1000).toISOString(), likes: u.likes ?? 0, comments: u.num_comments ?? 0, body: (u.body ?? "").replace(/\s+/g, " ").trim() }));
 async function getRecent() { return normUpdates((await json("/v1/recent")).update); }
 async function getSectionUpdates(sectionId) { return normUpdates((await json(`/v1/sections/${sectionId}/updates`)).update); }
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; results[index] = await fn(items[index], index); }
+  }));
+  return results;
+}
+
+// Whether the student has turned in a native Schoology (dropbox) assignment.
+async function getDropboxSubmission(sectionId, assignmentId) {
+  const r = await apiFetch(`/v1/sections/${sectionId}/submissions/${assignmentId}/${await uid()}?with_attachments=1`);
+  if (r.status < 200 || r.status >= 300) return { status: "unknown", note: `Schoology returned HTTP ${r.status} for the submission list.` };
+  const revisions = (JSON.parse(r.body).revision ?? []).filter((rev) => !Number(rev.draft));
+  if (!revisions.length) return { status: "not_submitted", revisions: 0 };
+  const latest = revisions.reduce((a, b) => (Number(b.created) > Number(a.created) ? b : a));
+  return {
+    status: "submitted",
+    submittedAt: new Date(Number(latest.created) * 1000).toISOString(),
+    late: !!Number(latest.late),
+    revisions: revisions.length,
+    files: (latest?.attachments?.files?.file ?? []).map((f) => f.title),
+  };
+}
+
 async function getAssignments(sectionId) {
   const targets = sectionId ? [{ id: sectionId }] : await getSections();
   const out = [];
@@ -222,15 +253,32 @@ async function getAssignments(sectionId) {
     const d = await json(`/v1/sections/${t.id}/assignments?with_attachments=1`);
     for (const a of (d.assignment ?? [])) {
       const files = (a?.attachments?.files?.file ?? []).map((f) => ({ title: f.title, ext: (f.extension ?? "").toLowerCase(), mime: f.filemime, size: f.filesize != null ? Number(f.filesize) : undefined }));
+      const externalTools = (a?.attachments?.external_tools?.external_tool ?? []).map((tool) => ({ id: String(tool.id), title: tool.title }));
+      const type = a.type ?? "assignment";
+      const platform = externalTools.length ? "external_tool" : type === "assignment" && Number(a.allow_dropbox) ? "schoology" : type;
       out.push({
         id: String(a.id), sectionId: t.id, courseTitle: t.courseTitle, title: a.title,
         due: a.due && !/^0000-00-00/.test(a.due) ? a.due : null,
-        type: a.type ?? "assignment", maxPoints: a.max_points != null ? Number(a.max_points) : undefined,
+        type, maxPoints: a.max_points != null ? Number(a.max_points) : undefined,
         webUrl: a.web_url, files,
+        ...(externalTools.length ? { externalTools } : {}),
+        submission: { platform, status: "unknown" },
         ...(files.length ? { readWith: { tool: "schoology_read_document", sectionId: t.id, documentId: String(a.id) } } : {}),
       });
     }
   }
+  await mapLimit(out, 4, async (assignment) => {
+    const { platform } = assignment.submission;
+    if (platform === "schoology") {
+      assignment.submission = { platform, ...(await getDropboxSubmission(assignment.sectionId, assignment.id)) };
+    } else if (platform === "external_tool") {
+      assignment.submission.note = "Submitted inside an embedded external tool (for example Google Assignments). Schoology does not record the turn-in; the status is unknown until it is graded.";
+    } else if (platform === "assessment_v2") {
+      assignment.submission.note = "Schoology assessment; the API does not expose whether it was submitted.";
+    } else {
+      assignment.submission.note = "This item has no Schoology dropbox, so nothing is submitted through Schoology.";
+    }
+  });
   return out;
 }
 function parseFolderLinks(html) {
@@ -564,7 +612,7 @@ const idProperty = { type: "string", pattern: "^[0-9]{1,32}$" };
 export const TOOLS = [
   { name: "schoology_get_profile", description: "Get the signed-in student's Schoology profile.", inputSchema: emptySchema },
   { name: "schoology_list_sections", description: "List enrolled Schoology sections with official StudentVUE course grades.", inputSchema: emptySchema },
-  { name: "schoology_get_assignments", description: "List Schoology assignments with attachments and matched StudentVUE scores.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty } } },
+  { name: "schoology_get_assignments", description: "List Schoology assignments with submission status (submitted, not submitted, or unknown), attachments, and matched StudentVUE scores.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty } } },
   { name: "schoology_get_materials", description: "List a course's nested folders, documents, pages, and assignments.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
   { name: "schoology_read_document", description: "Read text from a Schoology document or assignment attachment.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty, documentId: idProperty }, required: ["sectionId", "documentId"] } },
   { name: "schoology_get_upcoming_events", description: "Get upcoming Schoology events within 1 to 180 days.", inputSchema: { type: "object", additionalProperties: false, properties: { days: { type: "integer", minimum: 1, maximum: 180 } } } },
