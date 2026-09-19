@@ -4,9 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { configureLocal, hiddenQuestion } from "./setup.js";
+import { askCredentials, configureLocal } from "./setup.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VERCEL_PACKAGE = "vercel@59.16.0";
@@ -47,12 +46,13 @@ export function runVercel(args, { cwd, input, captureOutput = false } = {}) {
   });
 }
 
-export async function deployProject({ directory, projectName, username, password, secret, runner = runVercel }) {
+export async function deployProject({ directory, projectName, username, password, secret, ion = null, runner = runVercel }) {
   await runner(["link", "--yes", "--project", projectName], { cwd: directory });
   for (const [name, value] of [
     ["SCHOOLOGY_USERNAME", username],
     ["SCHOOLOGY_PASSWORD", password],
     ["MCP_SECRET", secret],
+    ...(ion ? [["ION_USERNAME", ion.username], ["ION_PASSWORD", ion.password]] : []),
   ]) {
     await runner(["env", "add", name, "production", "--sensitive"], { cwd: directory, input: value });
   }
@@ -77,17 +77,14 @@ export async function runDeploy() {
 
   stdout.write("\nFCPS School MCP — local + remote setup\n\n");
   stdout.write("This configures supported apps on this computer, installs the Vercel CLI, and creates a private remote MCP in your account.\n");
-  stdout.write("Your FCPS credentials will be saved locally and stored as Secret environment variables in that Vercel project.\n\n");
+  stdout.write("Your credentials will be saved locally and stored as Secret environment variables in that Vercel project.\n\n");
   await runVercel(["login"]);
+  stdout.write("\n");
 
-  const reader = createInterface({ input: stdin, output: stdout });
-  const username = (await reader.question("\nFCPS username: ")).trim();
-  reader.close();
-  const password = await hiddenQuestion("FCPS password: ");
-  if (!username || !password) throw new Error("Both username and password are required.");
+  const { username, password, ion } = await askCredentials();
 
   stdout.write("\nSetting up local MCP access...\n");
-  await configureLocal(username, password);
+  await configureLocal(username, password, undefined, ion);
 
   const secret = randomBytes(24).toString("base64url");
   const projectName = `fcps-school-mcp-${randomBytes(4).toString("hex")}`;
@@ -96,7 +93,7 @@ export async function runDeploy() {
   try {
     stdout.write("\nCreating your private Vercel deployment...\n");
     await copyDeploymentSource(directory);
-    const mcpUrl = await deployProject({ directory, projectName, username, password, secret });
+    const mcpUrl = await deployProject({ directory, projectName, username, password, secret, ion });
     stdout.write("\nDeployment complete. Keep this URL private:\n\n");
     stdout.write(`${mcpUrl}\n\n`);
     stdout.write("Paste this URL into any AI app that supports a custom remote MCP URL. Choose Streamable HTTP and No authentication if prompted.\n");

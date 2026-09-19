@@ -1,4 +1,6 @@
-import { loadCredentials } from "./config.js";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { configRoot, loadCredentials } from "./config.js";
 
 // FCPS-only endpoints. The server intentionally has no configurable outbound
 // host so MCP tool arguments cannot turn it into a general-purpose HTTP proxy.
@@ -10,11 +12,56 @@ const FR = "https://aic.fcps.edu";
 const REALM_PATH = "/am/json/realms/root/realms/alpha/authenticate";
 const API_VERSION = "resource=2.1, protocol=1.0";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const AUTH_COOLDOWN_MS = 15 * 60 * 1000; // after a login failure, wait before retrying (ForgeRock lockout guard)
+// ForgeRock locks the account after repeated bad passwords, so a login is paused
+// ONLY when FCPS explicitly rejects the credentials. Network blips, SSO redirect
+// hiccups and expired sessions are retried immediately instead.
+const REJECTED_PAUSE_MS = 15 * 60 * 1000;
+const LOCKOUT_PAUSE_MS = 60 * 60 * 1000;
 const ALLOWED_HOSTS = new Set(["aic.fcps.edu", "app.schoology.com", "lms.fcps.edu", "sis.fcps.edu", "sisstudent.fcps.edu"]);
 
 // ---- session state, persisted across warm invocations ----
-const S = { jar: [], uid: null, failAt: 0, fails: 0 };
+const S = { jar: [], uid: null, pausedUntil: 0, pauseReason: "", loaded: false };
+
+class CredentialsRejectedError extends Error {
+  constructor(message, lockout = false) { super(message); this.name = "CredentialsRejectedError"; this.lockout = lockout; }
+}
+
+// The cookie jar is cached on disk (local installs only; the file is 0600) so a
+// client restart reuses the session instead of logging into FCPS again. Fewer
+// logins means fewer chances to trip ForgeRock's lockout counter.
+function sessionPath() { return join(configRoot(), "session.json"); }
+async function loadSession() {
+  if (S.loaded) return;
+  S.loaded = true;
+  try {
+    const parsed = JSON.parse(await readFile(sessionPath(), "utf8"));
+    if (Array.isArray(parsed?.jar) && Date.now() - (parsed.savedAt || 0) < 12 * 60 * 60 * 1000) S.jar = parsed.jar;
+  } catch {}
+}
+async function saveSession() {
+  try {
+    await mkdir(configRoot(), { recursive: true, mode: 0o700 });
+    await writeFile(sessionPath(), JSON.stringify({ savedAt: Date.now(), jar: S.jar }), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(sessionPath(), 0o600);
+  } catch {}
+}
+function clearCookies(hosts = null) {
+  S.jar = hosts ? S.jar.filter((c) => !hosts.some((h) => h === c.domain || h.endsWith("." + c.domain))) : [];
+  S.uid = null;
+}
+function pauseLogins(error) {
+  const ms = error.lockout ? LOCKOUT_PAUSE_MS : REJECTED_PAUSE_MS;
+  S.pausedUntil = Date.now() + ms;
+  S.pauseReason = error.message;
+}
+function assertNotPaused() {
+  if (Date.now() < S.pausedUntil) {
+    throw new Error(`FCPS login is paused until ${new Date(S.pausedUntil).toISOString()} because ${S.pauseReason} Fix the credentials (re-run the setup command) to avoid locking the account.`);
+  }
+}
+export function authState() {
+  return { paused: Date.now() < S.pausedUntil, pausedUntil: S.pausedUntil ? new Date(S.pausedUntil).toISOString() : null, reason: S.pauseReason || null };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function decodeEntities(s) {
@@ -70,21 +117,52 @@ function deviceProfile() {
     platform: { language: "en-US", platform: "MacIntel", userLanguages: ["en-US"], timezone: 300 } } });
 }
 
+async function forgerockStep(body) {
+  const res = await raw(FR + REALM_PATH, { method: "POST", headers: { "Content-Type": "application/json", "Accept-API-Version": API_VERSION }, body });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error(`FCPS sign-in (ForgeRock) answered HTTP ${res.status} with a non-JSON page; the SSO service may be down or changed.`); }
+  if (res.status === 401 || (data.code && data.code >= 400)) {
+    const message = String(data.message || data.reason || "Authentication Failed");
+    throw new CredentialsRejectedError(`FCPS rejected the username/password (ForgeRock said: "${message}").`, /lock/i.test(message));
+  }
+  if (res.status >= 400) throw new Error(`FCPS sign-in (ForgeRock) answered HTTP ${res.status}: ${String(data.message || text).slice(0, 200)}`);
+  return data;
+}
+function fillCallbacks(callbacks, username, password) {
+  const notes = [];
+  for (const cb of callbacks) {
+    const input = cb.input?.[0];
+    if (cb.type === "NameCallback" && input) input.value = username;
+    else if (cb.type === "PasswordCallback" && input) input.value = password;
+    else if (cb.type === "DeviceProfileCallback" && input) input.value = deviceProfile();
+    else if ((cb.type === "ConfirmationCallback" || cb.type === "ChoiceCallback") && input) input.value = 0;
+    else if (cb.type === "BooleanAttributeInputCallback" && input) input.value = true;
+    else if (cb.type === "TextOutputCallback") {
+      const message = String(cb.output?.find((o) => o.name === "message")?.value ?? "");
+      if (message && message.length < 300 && !/function|=>|document\./.test(message)) notes.push(message.trim());
+    }
+  }
+  return notes;
+}
 async function forgerockAuth() {
   const { username, password } = await loadCredentials();
-  const H = { "Content-Type": "application/json", "Accept-API-Version": API_VERSION };
-  let data = await (await raw(FR + REALM_PATH, { method: "POST", headers: H, body: "{}" })).json();
-  for (let stage = 0; stage < 6; stage++) {
+  clearCookies(["aic.fcps.edu"]);
+  let data = await forgerockStep("{}");
+  let previousShape = "";
+  for (let stage = 0; stage < 10; stage++) {
     if (data.tokenId) return;
-    if (!data.callbacks) throw new Error(`ForgeRock auth failed${data.message ? ": " + data.message : ""}.`);
-    for (const cb of data.callbacks) {
-      if (cb.type === "NameCallback") cb.input[0].value = username;
-      else if (cb.type === "PasswordCallback") cb.input[0].value = password;
-      else if (cb.type === "DeviceProfileCallback") cb.input[0].value = deviceProfile();
+    if (!data.callbacks) throw new Error(`FCPS sign-in ended without a session${data.message ? ` (${data.message})` : ""}.`);
+    const shape = data.callbacks.map((cb) => cb.type).join(",");
+    const notes = fillCallbacks(data.callbacks, username, password);
+    if (notes.some((n) => /lock/i.test(n))) throw new CredentialsRejectedError(`FCPS rejected the username/password (ForgeRock said: "${notes.find((n) => /lock/i.test(n))}").`, true);
+    if (shape === previousShape && stage > 0) {
+      throw new Error(`FCPS sign-in is asking for something this connector cannot answer (${shape}${notes.length ? `: ${notes.join(" | ")}` : ""}). Sign in once in a browser to check whether FCPS added a new step.`);
     }
-    data = await (await raw(FR + REALM_PATH, { method: "POST", headers: H, body: JSON.stringify(data) })).json();
+    previousShape = shape;
+    data = await forgerockStep(JSON.stringify(data));
   }
-  if (!data.tokenId) throw new Error("ForgeRock auth exhausted stages without a token.");
+  throw new Error("FCPS sign-in did not finish after 10 steps.");
 }
 async function completeSaml() {
   let url = BASE + "/home";
@@ -123,19 +201,37 @@ async function isAuthed() {
     return r.status >= 200 && r.status < 300 && r.ct.includes("json") && !/Log in to Schoology/i.test(r.body);
   } catch { return false; }
 }
+// Runs `attempt` (which should end with the service authenticated) with the
+// lockout rules: credential rejections pause further logins; anything else is
+// retried once from a clean cookie jar before giving up.
+async function withLogin(service, attempt) {
+  await loadSession();
+  assertNotPaused();
+  let lastError;
+  for (let round = 0; round < 2; round++) {
+    try {
+      const result = await attempt(round > 0);
+      await saveSession();
+      return result;
+    } catch (error) {
+      if (error instanceof CredentialsRejectedError) { pauseLogins(error); throw error; }
+      lastError = error;
+      clearCookies();
+    }
+  }
+  throw new Error(`${service} login failed twice: ${lastError?.message || lastError}`);
+}
 async function ensureAuthed() {
+  await loadSession();
   if (await isAuthed()) return;
-  if (S.fails >= 1 && Date.now() - S.failAt < AUTH_COOLDOWN_MS)
-    throw new Error("Login is cooling down after a recent failure (lockout guard). Try again later or check credentials.");
-  try {
-    try { await completeSaml(); } catch {}
+  await withLogin("Schoology", async (fresh) => {
+    if (!fresh) { try { await completeSaml(); } catch {} }
     if (!(await isAuthed())) {
       await forgerockAuth();
       await completeSaml();
     }
-    if (!(await isAuthed())) throw new Error("Login completed but session is not authenticated.");
-    S.fails = 0;
-  } catch (e) { S.fails++; S.failAt = Date.now(); throw e; }
+    if (!(await isAuthed())) throw new Error("FCPS sign-in succeeded but Schoology did not open a session.");
+  });
 }
 
 async function completeStudentVueSaml() {
@@ -175,22 +271,32 @@ async function studentVueShell() {
 }
 
 async function ensureStudentVueAuthed() {
-  let shell = await studentVueShell();
-  if (shell) return shell;
-  if (S.fails >= 1 && Date.now() - S.failAt < AUTH_COOLDOWN_MS)
-    throw new Error("Login is cooling down after a recent failure (lockout guard). Try again later or check credentials.");
-  try {
-    await completeStudentVueSaml();
-    shell = await studentVueShell();
+  await loadSession();
+  const existing = await studentVueShell();
+  if (existing) return existing;
+  return withLogin("StudentVUE", async (fresh) => {
+    let shell = null;
+    if (!fresh) {
+      try { await completeStudentVueSaml(); shell = await studentVueShell(); } catch {}
+    }
     if (!shell) {
       await forgerockAuth();
       await completeStudentVueSaml();
       shell = await studentVueShell();
     }
-    if (!shell) throw new Error("FCPS SSO completed but StudentVUE did not open the gradebook.");
-    S.fails = 0;
+    if (!shell) throw new Error("FCPS sign-in succeeded but StudentVUE did not open the gradebook.");
     return shell;
-  } catch (e) { S.fails++; S.failAt = Date.now(); throw e; }
+  });
+}
+
+// Diagnostic: tries each service and reports exactly why a login fails.
+export async function fcpsStatus() {
+  const check = async (fn) => {
+    try { await fn(); return { ok: true }; } catch (error) { return { ok: false, error: error.message }; }
+  };
+  const schoology = await check(ensureAuthed);
+  const studentVue = await check(ensureStudentVueAuthed);
+  return { schoology, studentVue, ...authState() };
 }
 
 async function json(path) {

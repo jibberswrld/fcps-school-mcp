@@ -1,5 +1,6 @@
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { timingSafeEqual } from "node:crypto";
+import { hasIonCredentials } from "../src/config.js";
 import { createServer } from "../src/server.js";
 
 export const config = { maxDuration: 60 };
@@ -42,7 +43,7 @@ export default async function handler(request, response) {
     return;
   }
 
-  const server = createServer();
+  const server = createServer({ ion: await hasIonCredentials() });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });

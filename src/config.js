@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-function configRoot() {
+export function configRoot() {
   if (process.env.FCPS_SCHOOL_MCP_CONFIG_DIR) {
     return process.env.FCPS_SCHOOL_MCP_CONFIG_DIR;
   }
@@ -21,6 +21,15 @@ function validCredentials(value) {
     && typeof value.password === "string" && value.password;
 }
 
+async function readCredentialsFile() {
+  try {
+    return JSON.parse(await readFile(credentialsPath(), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new Error(`Could not read ${credentialsPath()}: ${error.message}`);
+  }
+}
+
 export async function loadCredentials() {
   const fromEnvironment = {
     username: process.env.SCHOOLOGY_USERNAME?.trim(),
@@ -28,15 +37,9 @@ export async function loadCredentials() {
   };
   if (validCredentials(fromEnvironment)) return fromEnvironment;
 
-  try {
-    const parsed = JSON.parse(await readFile(credentialsPath(), "utf8"));
-    if (validCredentials(parsed)) {
-      return { username: parsed.username.trim(), password: parsed.password };
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw new Error(`Could not read ${credentialsPath()}: ${error.message}`);
-    }
+  const parsed = await readCredentialsFile();
+  if (validCredentials(parsed)) {
+    return { username: parsed.username.trim(), password: parsed.password };
   }
 
   throw new Error(
@@ -44,9 +47,41 @@ export async function loadCredentials() {
   );
 }
 
-export async function saveCredentials(username, password) {
+// TJHSST Ion (the TJ intranet) is optional: only students at TJ have an account.
+export async function loadIonCredentials() {
+  const fromEnvironment = {
+    username: process.env.ION_USERNAME?.trim(),
+    password: process.env.ION_PASSWORD,
+  };
+  if (validCredentials(fromEnvironment)) return fromEnvironment;
+
+  const parsed = await readCredentialsFile();
+  if (validCredentials(parsed?.ion)) {
+    return { username: parsed.ion.username.trim(), password: parsed.ion.password };
+  }
+
+  throw new Error(
+    "Ion credentials are not configured. Re-run the setup command and answer yes to the TJHSST question.",
+  );
+}
+
+export async function hasIonCredentials() {
+  try {
+    await loadIonCredentials();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function saveCredentials(username, password, ion = null) {
   const credentials = { username: String(username).trim(), password: String(password) };
   if (!validCredentials(credentials)) throw new Error("Both username and password are required.");
+  if (ion) {
+    const ionCredentials = { username: String(ion.username).trim(), password: String(ion.password) };
+    if (!validCredentials(ionCredentials)) throw new Error("Both Ion username and password are required.");
+    credentials.ion = ionCredentials;
+  }
 
   const target = credentialsPath();
   const temporary = `${target}.${process.pid}.tmp`;
