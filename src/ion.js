@@ -138,6 +138,8 @@ function today() {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 function pageResults(data) { return Array.isArray(data) ? data : (data?.results ?? []); }
+// Ion serializes related ids sometimes as a bare number and sometimes as { id, url }.
+function idOf(value) { const id = value != null && typeof value === "object" ? value.id : value; return id == null ? null : String(id); }
 
 async function getProfile() {
   const p = await ensureAuthed();
@@ -198,7 +200,7 @@ async function getMySignups(date, startDate) {
   return pageResults(await getJson(`/signups/user?${params}`)).map((item) => ({ signupId: item.id == null ? null : String(item.id),
     blockId: item.block?.id == null ? null : String(item.block.id), date: item.block?.date, letter: item.block?.block_letter,
     activityId: item.activity?.id == null ? null : String(item.activity.id), activityName: item.activity?.title ?? item.activity?.name,
-    scheduledActivityId: item.scheduled_activity?.id == null ? null : String(item.scheduled_activity.id) }));
+    scheduledActivityId: idOf(item.scheduled_activity) }));
 }
 async function signup(args) {
   const payload = args.scheduledActivityId ? { scheduled_activity: args.scheduledActivityId, use_scheduled_activity: true }
