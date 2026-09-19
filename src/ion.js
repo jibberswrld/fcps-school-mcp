@@ -82,11 +82,12 @@ async function login() {
       const res = await raw(`${BASE}/login`, { method: "POST", body: body.toString(), redirect: "manual", headers: {
         Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded", Referer: `${BASE}/login`, Origin: BASE,
       } });
-      const responseText = await res.text(), decodedResponse = decodeEntities(responseText), message = plainText(responseText);
-      const rejection = decodedResponse.match(/Invalid password[^.<"']*\.?|Intranet access restricted[^.<"']*\.?/i)?.[0];
-      if (rejection) throw new CredentialsRejectedError(rejection.trim());
-      if (/two[- ]factor|\b2fa\b|one[- ]time password|otp (?:is )?(?:required|enabled)|authentication code/i.test(message)) {
-        const error = new Error("Ion 2FA is enabled and this connector cannot complete it."); error.noRetry = true; throw error;
+      const responseText = decodeEntities(await res.text());
+      // Ion re-renders the login form (HTTP 200) on a bad password and puts the
+      // reason in the field's placeholder attribute, so inspect the raw HTML.
+      if (res.status === 200 && /name=["']auth_form["']/i.test(responseText)) {
+        const reason = responseText.match(/Invalid password|Intranet access restricted|Invalid username/i)?.[0] ?? "the login form was shown again";
+        throw new CredentialsRejectedError(`${reason}; note that Ion accounts with 2FA enabled cannot be used here`);
       }
       if (res.status !== 302) throw new Error(`Ion login returned HTTP ${res.status} instead of a successful redirect.`);
       if (!S.jar.some((cookie) => cookie.name === "sessionid" && cookie.value)) throw new Error("Ion login redirected without setting a sessionid cookie.");
@@ -206,12 +207,18 @@ async function signup(args) {
   if ([400, 403].includes(res.status)) throw new Error(`Ion refused the signup: ${responseReason(data, text)}`);
   if (!res.ok) throw new Error(`Ion signup failed with HTTP ${res.status}: ${responseReason(data, text)}`);
   if (res.status !== 201) throw new Error(`Ion signup returned unexpected HTTP ${res.status}.`);
-  const scheduled = data?.scheduled_activity ?? data, block = data?.block ?? scheduled?.block ?? {}, activity = data?.activity ?? scheduled?.activity ?? data ?? {};
-  const suppliedMessage = data?.message ?? data?.detail, waitlisted = data?.waitlisted === true || /waitlist/i.test(String(suppliedMessage ?? ""));
-  const message = typeof suppliedMessage === "string" ? suppliedMessage : (waitlisted ? "Added to the waitlist." : "Signed up successfully.");
-  return { status: waitlisted ? "waitlisted" : "signed_up", block: { id: block.id == null ? null : String(block.id), date: block.date ?? null,
-    letter: block.block_letter ?? null }, activity: { id: activity.id == null ? null : String(activity.id), name: activity.name ?? activity.title ?? null },
-    message };
+  // Ion answers 201 for both a real signup and a waitlist placement, and the
+  // body is just the activity, so confirm against the student's signup list.
+  const signups = await getMySignups(undefined, today());
+  const confirmed = signups.find((item) => args.scheduledActivityId
+    ? item.scheduledActivityId === args.scheduledActivityId
+    : item.blockId === args.blockId && item.activityId === args.activityId);
+  if (confirmed) {
+    return { status: "signed_up", block: { id: confirmed.blockId, date: confirmed.date, letter: confirmed.letter },
+      activity: { id: confirmed.activityId, name: confirmed.activityName }, message: "Signed up successfully; the signup is on your Ion schedule." };
+  }
+  return { status: "waitlisted", activity: { id: data?.id == null ? null : String(data.id), name: data?.name ?? null },
+    message: "Ion accepted the request but the signup is not on your schedule, so you were most likely added to the waitlist." };
 }
 
 const emptySchema = { type: "object", additionalProperties: false, properties: {} };
