@@ -7,9 +7,10 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import remoteHandler from "../api/mcp.js";
-import { credentialsPath, loadCredentials } from "../src/config.js";
+import { credentialsPath, loadCredentials, loadIonCredentials } from "../src/config.js";
 import { buildMcpUrl, deployProject } from "../src/deploy.js";
 import { TOOLS, validateToolCall } from "../src/fcps.js";
+import { ION_TOOLS, ionStatus, validateIonToolCall } from "../src/ion.js";
 import { createServer } from "../src/server.js";
 import { configureLocal, mergeClientConfig } from "../src/setup.js";
 
@@ -19,16 +20,54 @@ test("exports the complete Schoology and StudentVUE tool set", () => {
   assert.ok(TOOLS.some((tool) => tool.name === "studentvue_get_grades"));
 });
 
-test("completes an MCP handshake and lists tools", async () => {
+test("exports the Ion tool set with a signup tool", () => {
+  assert.equal(ION_TOOLS.length, 8);
+  assert.ok(ION_TOOLS.every((tool) => tool.name.startsWith("ion_")));
+  assert.ok(ION_TOOLS.some((tool) => tool.name === "ion_signup_eighth_period"));
+  assert.ok(ION_TOOLS.every((tool) => tool.inputSchema.additionalProperties === false));
+});
+
+async function listTools(options) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createServer();
+  const server = createServer(options);
   const client = new Client({ name: "test-client", version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   const result = await client.listTools();
-  assert.equal(result.tools.length, 11);
-  assert.ok(result.tools.some((tool) => tool.name === "studentvue_get_assignments"));
   await client.close();
   await server.close();
+  return result.tools;
+}
+
+test("completes an MCP handshake and lists FCPS tools plus the login check", async () => {
+  const tools = await listTools();
+  assert.equal(tools.length, 12);
+  assert.ok(tools.some((tool) => tool.name === "studentvue_get_assignments"));
+  assert.ok(tools.some((tool) => tool.name === "school_check_login"));
+  assert.ok(!tools.some((tool) => tool.name.startsWith("ion_")));
+});
+
+test("lists Ion tools only when Ion is configured", async () => {
+  const tools = await listTools({ ion: true });
+  assert.equal(tools.length, 20);
+  assert.ok(tools.some((tool) => tool.name === "ion_get_block_activities"));
+});
+
+test("validates untrusted Ion tool arguments", () => {
+  assert.throws(() => validateIonToolCall("ion_get_profile", { injected: true }), /Unexpected tool argument/);
+  assert.throws(() => validateIonToolCall("ion_get_block_activities", { blockId: "../x" }), /digits/);
+  assert.throws(() => validateIonToolCall("ion_get_schedule", { date: "2026-02-31" }), /YYYY-MM-DD/);
+  assert.throws(() => validateIonToolCall("ion_signup_eighth_period", {}), /scheduledActivityId|blockId/);
+  assert.throws(() => validateIonToolCall("nope", {}), /Unknown tool/);
+});
+
+test("reports Ion as unconfigured without credentials instead of throwing", async () => {
+  const configDirectory = await mkdtemp(join(tmpdir(), "fcps-ion-status-"));
+  process.env.FCPS_SCHOOL_MCP_CONFIG_DIR = configDirectory;
+  delete process.env.ION_USERNAME;
+  delete process.env.ION_PASSWORD;
+  const status = await ionStatus();
+  assert.equal(status.configured, false);
+  assert.equal(status.authenticated, false);
 });
 
 test("validates untrusted tool arguments", () => {
@@ -62,12 +101,22 @@ test("local setup saves credentials outside the repository and reads them back",
   delete process.env.SCHOOLOGY_USERNAME;
   delete process.env.SCHOOLOGY_PASSWORD;
 
+  delete process.env.ION_USERNAME;
+  delete process.env.ION_PASSWORD;
+
   const sampleValue = ["test", "value", "only"].join("-");
   await configureLocal("student", sampleValue, []);
   const loaded = await loadCredentials();
   assert.equal(loaded.username, "student");
   assert.equal(loaded.password, sampleValue);
   assert.equal(credentialsPath(), join(configDirectory, "credentials.json"));
+  await assert.rejects(loadIonCredentials(), /Ion credentials are not configured/);
+
+  await configureLocal("student", sampleValue, [], { username: "2029student", password: sampleValue });
+  const ion = await loadIonCredentials();
+  assert.equal(ion.username, "2029student");
+  assert.equal(ion.password, sampleValue);
+  assert.equal((await loadCredentials()).username, "student");
   if (process.platform !== "win32") {
     assert.equal((await stat(credentialsPath())).mode & 0o777, 0o600);
   }
@@ -125,11 +174,29 @@ test("deploys credentials as Vercel secrets without putting them in arguments", 
   assert.ok(!commandArguments.includes(values.username));
   assert.ok(!commandArguments.includes(values.password));
   assert.ok(!commandArguments.includes(values.secret));
+
+  calls.length = 0;
+  await deployProject({
+    directory: "/temporary/project",
+    projectName: "fcps-school-mcp-example",
+    ...values,
+    ion: { username: "2029student", password: ["ion", "password", "only"].join("-") },
+    runner,
+  });
+  assert.deepEqual(calls.slice(4, 6).map((call) => call.args), [
+    ["env", "add", "ION_USERNAME", "production", "--sensitive"],
+    ["env", "add", "ION_PASSWORD", "production", "--sensitive"],
+  ]);
+  assert.equal(calls[5].options.input, ["ion", "password", "only"].join("-"));
+  assert.deepEqual(calls[6].args, ["deploy", "--prod", "--yes", "--json"]);
 });
 
 test("serves the complete tool list over authenticated Streamable HTTP", async () => {
   const previousSecret = process.env.MCP_SECRET;
   process.env.MCP_SECRET = "test-mcp-url-secret";
+  process.env.FCPS_SCHOOL_MCP_CONFIG_DIR = await mkdtemp(join(tmpdir(), "fcps-remote-test-"));
+  delete process.env.ION_USERNAME;
+  delete process.env.ION_PASSWORD;
   const httpServer = createHttpServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -169,8 +236,15 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
 
     const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     assert.equal(listed.status, 200);
-    assert.equal((await readMcpResponse(listed)).result.tools.length, 11);
+    assert.equal((await readMcpResponse(listed)).result.tools.length, 12);
+
+    process.env.ION_USERNAME = "2029student";
+    process.env.ION_PASSWORD = ["ion", "test", "only"].join("-");
+    const withIon = await post({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+    assert.equal((await readMcpResponse(withIon)).result.tools.length, 20);
   } finally {
+    delete process.env.ION_USERNAME;
+    delete process.env.ION_PASSWORD;
     await new Promise((resolvePromise) => httpServer.close(resolvePromise));
     if (previousSecret == null) delete process.env.MCP_SECRET;
     else process.env.MCP_SECRET = previousSecret;

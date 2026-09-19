@@ -6,7 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { saveCredentials } from "./config.js";
 
-const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.1.0.tar.gz";
+const PACKAGE_SPEC = "https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.2.0.tar.gz";
 const SERVER_NAME = "fcps-school";
 
 function commandConfig() {
@@ -102,8 +102,8 @@ export async function hiddenQuestion(prompt) {
   return value;
 }
 
-export async function configureLocal(username, password, availableClients = candidates()) {
-  const savedAt = await saveCredentials(username, password);
+export async function configureLocal(username, password, availableClients = candidates(), ion = null) {
+  const savedAt = await saveCredentials(username, password, ion);
   const detected = [];
   for (const client of availableClients) {
     if (await parentExists(client.path)) {
@@ -123,11 +123,30 @@ export async function configureLocal(username, password, availableClients = cand
   return { savedAt, detected };
 }
 
-export async function runSetup() {
-  stdout.write("\nFCPS School MCP setup\n\nCredentials stay on this computer and are only sent to official FCPS login services.\n\n");
+export async function askCredentials() {
   const reader = createInterface({ input: stdin, output: stdout });
   const username = (await reader.question("FCPS username: ")).trim();
   reader.close();
   const password = await hiddenQuestion("FCPS password: ");
-  await configureLocal(username, password);
+  if (!username || !password) throw new Error("Both username and password are required.");
+
+  const tjReader = createInterface({ input: stdin, output: stdout });
+  const answer = (await tjReader.question("\nAre you a TJHSST student? Ion (the TJ intranet) adds the bell schedule, announcements, and eighth period signups. [y/N]: ")).trim().toLowerCase();
+  let ion = null;
+  if (answer === "y" || answer === "yes") {
+    const ionUsername = (await tjReader.question("Ion username: ")).trim();
+    tjReader.close();
+    const ionPassword = await hiddenQuestion("Ion password: ");
+    if (!ionUsername || !ionPassword) throw new Error("Both Ion username and password are required.");
+    ion = { username: ionUsername, password: ionPassword };
+  } else {
+    tjReader.close();
+  }
+  return { username, password, ion };
+}
+
+export async function runSetup() {
+  stdout.write("\nFCPS School MCP setup\n\nCredentials stay on this computer and are only sent to the official FCPS and TJHSST Ion login services.\n\n");
+  const { username, password, ion } = await askCredentials();
+  await configureLocal(username, password, candidates(), ion);
 }
