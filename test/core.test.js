@@ -255,3 +255,15 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
     else process.env.MCP_SECRET = previousSecret;
   }
 });
+
+test("MCP_SECRET accepts a comma-separated list of per-client keys", async () => {
+  const { allowedSecrets, secretsMatch } = await import("../api/mcp.js");
+  assert.deepEqual(allowedSecrets(" chatgpt-key, heyclicky-key ,"), ["chatgpt-key", "heyclicky-key"]);
+  assert.equal(secretsMatch("chatgpt-key", "chatgpt-key,heyclicky-key"), true);
+  assert.equal(secretsMatch("heyclicky-key", "chatgpt-key,heyclicky-key"), true);
+  assert.equal(secretsMatch("chatgpt-key,heyclicky-key", "chatgpt-key,heyclicky-key"), false);
+  assert.equal(secretsMatch("wrong", "chatgpt-key,heyclicky-key"), false);
+  assert.equal(secretsMatch("only-key", "only-key"), true);
+  assert.equal(secretsMatch(undefined, "only-key"), false);
+  assert.equal(secretsMatch("", ""), false);
+});
