@@ -71,22 +71,39 @@ export async function mergeClientConfig(path) {
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
-export async function hiddenQuestion(prompt) {
-  if (!stdin.isTTY || !stdin.setRawMode) {
+export async function hiddenQuestion(prompt, input = stdin, output = stdout) {
+  if (!input.isTTY || !input.setRawMode) {
     throw new Error("This command needs an interactive terminal.");
   }
-  stdout.write(prompt);
-  stdin.setRawMode(true);
-  stdin.resume();
-  stdin.setEncoding("utf8");
-  let value = "";
-  try {
-    for await (const chunk of stdin) {
+  output.write(prompt);
+  input.setRawMode(true);
+  input.resume();
+  input.setEncoding("utf8");
+
+  return new Promise((resolve, reject) => {
+    let value = "";
+
+    const cleanup = () => {
+      input.removeListener("data", onData);
+      input.removeListener("error", onError);
+      try {
+        input.setRawMode(false);
+      } catch {}
+      input.pause();
+    };
+
+    function onData(chunk) {
       for (const character of chunk) {
-        if (character === "\u0003") throw new Error("Command cancelled.");
+        if (character === "\u0003") {
+          cleanup();
+          reject(new Error("Command cancelled."));
+          return;
+        }
         if (character === "\r" || character === "\n") {
-          stdout.write("\n");
-          return value;
+          cleanup();
+          output.write("\n");
+          resolve(value);
+          return;
         }
         if (character === "\u007f" || character === "\b") {
           value = value.slice(0, -1);
@@ -95,11 +112,15 @@ export async function hiddenQuestion(prompt) {
         }
       }
     }
-  } finally {
-    stdin.setRawMode(false);
-    stdin.pause();
-  }
-  return value;
+
+    function onError(error) {
+      cleanup();
+      reject(error);
+    }
+
+    input.on("data", onData);
+    input.on("error", onError);
+  });
 }
 
 export async function configureLocal(username, password, availableClients = candidates(), ion = null) {
@@ -123,20 +144,20 @@ export async function configureLocal(username, password, availableClients = cand
   return { savedAt, detected };
 }
 
-export async function askCredentials() {
-  const reader = createInterface({ input: stdin, output: stdout });
+export async function askCredentials(input = stdin, output = stdout) {
+  const reader = createInterface({ input, output });
   const username = (await reader.question("FCPS username: ")).trim();
   reader.close();
-  const password = await hiddenQuestion("FCPS password: ");
+  const password = await hiddenQuestion("FCPS password: ", input, output);
   if (!username || !password) throw new Error("Both username and password are required.");
 
-  const tjReader = createInterface({ input: stdin, output: stdout });
+  const tjReader = createInterface({ input, output });
   const answer = (await tjReader.question("\nAre you a TJHSST student? Ion (the TJ intranet) adds the bell schedule, announcements, and eighth period signups. [y/N]: ")).trim().toLowerCase();
   let ion = null;
   if (answer === "y" || answer === "yes") {
     const ionUsername = (await tjReader.question("Ion username: ")).trim();
     tjReader.close();
-    const ionPassword = await hiddenQuestion("Ion password: ");
+    const ionPassword = await hiddenQuestion("Ion password: ", input, output);
     if (!ionUsername || !ionPassword) throw new Error("Both Ion username and password are required.");
     ion = { username: ionUsername, password: ionPassword };
   } else {
