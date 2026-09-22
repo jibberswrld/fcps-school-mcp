@@ -11,8 +11,9 @@ import { credentialsPath, loadCredentials, loadIonCredentials } from "../src/con
 import { buildMcpUrl, deployProject } from "../src/deploy.js";
 import { TOOLS, validateToolCall } from "../src/fcps.js";
 import { ION_TOOLS, ionStatus, validateIonToolCall } from "../src/ion.js";
-import { createServer } from "../src/server.js";
-import { configureLocal, mergeClientConfig } from "../src/setup.js";
+import { PassThrough } from "node:stream";
+import { createServer } from "../src/mcp-server.js";
+import { askCredentials, configureLocal, hiddenQuestion, mergeClientConfig } from "../src/setup.js";
 
 test("exports the complete Schoology and StudentVUE tool set", () => {
   assert.equal(TOOLS.length, 11);
@@ -255,3 +256,42 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
     else process.env.MCP_SECRET = previousSecret;
   }
 });
+
+test("askCredentials collects credentials without destroying input stream", async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => {};
+  const output = { write() {} };
+
+  const credentialsPromise = askCredentials(input, output);
+  process.nextTick(() => {
+    input.write("1740712\n");
+    setTimeout(() => {
+      input.write("mypassword\n");
+      setTimeout(() => {
+        input.write("y\n");
+        setTimeout(() => {
+          input.write("tjuser\n");
+          setTimeout(() => {
+            input.write("tjpass\n");
+          }, 5);
+        }, 5);
+      }, 5);
+    }, 5);
+  });
+
+  const credentials = await credentialsPromise;
+  assert.equal(credentials.username, "1740712");
+  assert.equal(credentials.password, "mypassword");
+  assert.deepEqual(credentials.ion, { username: "tjuser", password: "tjpass" });
+  assert.equal(input.destroyed, false);
+});
+
+test("mcp-server.js exists and server.js is not present to avoid Vercel entrypoint collision", async () => {
+  const mcpServer = await import("../src/mcp-server.js");
+  assert.equal(typeof mcpServer.createServer, "function");
+  assert.equal(typeof mcpServer.startServer, "function");
+  await assert.rejects(import("../src/server.js"), { code: "ERR_MODULE_NOT_FOUND" });
+});
+
+

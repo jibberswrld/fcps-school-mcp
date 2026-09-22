@@ -70,6 +70,7 @@ async function copyDeploymentSource(target) {
     copyFile(join(PACKAGE_ROOT, "package.json"), join(target, "package.json")),
     copyFile(join(PACKAGE_ROOT, "vercel.json"), join(target, "vercel.json")),
   ]);
+  await rm(join(target, "src/server.js"), { force: true });
 }
 
 export async function runDeploy() {

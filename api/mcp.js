@@ -1,7 +1,7 @@
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { timingSafeEqual } from "node:crypto";
 import { hasIonCredentials } from "../src/config.js";
-import { createServer } from "../src/server.js";
+import { createServer } from "../src/mcp-server.js";
 
 export const config = { maxDuration: 60 };
 

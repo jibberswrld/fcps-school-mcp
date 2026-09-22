@@ -2,7 +2,7 @@
 
 import { runDeploy } from "./deploy.js";
 import { runSetup } from "./setup.js";
-import { startServer } from "./server.js";
+import { startServer } from "./mcp-server.js";
 
 const command = process.argv[2];
 
