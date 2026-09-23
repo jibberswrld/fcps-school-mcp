@@ -13,10 +13,26 @@ function suppliedSecret(request) {
     ?? new URL(request.url, "http://localhost").searchParams.get("k");
 }
 
-function secretsMatch(provided, expected) {
+// MCP_SECRET may hold several comma-separated keys so each client gets its own,
+// revocable independently of the others.
+export function allowedSecrets(value) {
+  return String(value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+function secretMatches(provided, expected) {
   const providedBytes = Buffer.from(provided ?? "");
   const expectedBytes = Buffer.from(expected);
   return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
+}
+
+export function secretsMatch(provided, configured) {
+  const allowed = allowedSecrets(configured);
+  if (allowed.length === 0) return false;
+  let matched = false;
+  for (const expected of allowed) {
+    if (secretMatches(provided, expected)) matched = true;
+  }
+  return matched;
 }
 
 export default async function handler(request, response) {
@@ -29,7 +45,7 @@ export default async function handler(request, response) {
   }
 
   const secret = process.env.MCP_SECRET;
-  if (!secret) {
+  if (allowedSecrets(secret).length === 0) {
     response.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "MCP_SECRET is not configured" }));
     return;
   }
