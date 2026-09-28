@@ -3,6 +3,7 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -12,7 +13,7 @@ import { buildMcpUrl, deployProject } from "../src/deploy.js";
 import { TOOLS, validateToolCall } from "../src/fcps.js";
 import { ION_TOOLS, ionStatus, validateIonToolCall } from "../src/ion.js";
 import { createServer } from "../src/server.js";
-import { configureLocal, mergeClientConfig } from "../src/setup.js";
+import { askCredentials, configureLocal, mergeClientConfig } from "../src/setup.js";
 
 test("exports the complete Schoology and StudentVUE tool set", () => {
   assert.equal(TOOLS.length, 11);
@@ -266,4 +267,27 @@ test("MCP_SECRET accepts a comma-separated list of per-client keys", async () =>
   assert.equal(secretsMatch("only-key", "only-key"), true);
   assert.equal(secretsMatch(undefined, "only-key"), false);
   assert.equal(secretsMatch("", ""), false);
+});
+
+test("setup keeps stdin readable after the hidden password prompt", async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => {};
+  const credentials = askCredentials(input, { write() {} });
+  for (const line of ["student1", "password1", "y", "tjuser", "tjpass"]) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    input.write(`${line}\n`);
+  }
+
+  assert.deepEqual(await credentials, {
+    username: "student1",
+    password: "password1",
+    ion: { username: "tjuser", password: "tjpass" },
+  });
+  assert.equal(input.destroyed, false);
+});
+
+test("Vercel builds only api/mcp.js instead of detecting src/server.js as the app", async () => {
+  const vercelConfig = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
+  assert.equal(vercelConfig.framework, null);
 });
