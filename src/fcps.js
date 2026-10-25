@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { configRoot, loadCredentials } from "./config.js";
+import { downloadAttachment, readAttachment, readAttachmentResponse } from "./documents.js";
 
 // FCPS-only endpoints. The server intentionally has no configurable outbound
 // host so MCP tool arguments cannot turn it into a general-purpose HTTP proxy.
@@ -423,7 +424,7 @@ async function getMaterials(sectionId) {
   return { sectionId, folders: [...folders.values()], items };
 }
 
-async function readDocument(sectionId, contentId) {
+async function readDocument(sectionId, contentId, options) {
   const documentResponse = await apiFetch(`/v1/sections/${sectionId}/documents/${contentId}`);
   let contentType = "document";
   let content;
@@ -441,33 +442,60 @@ async function readDocument(sectionId, contentId) {
   const files = content?.attachments?.files?.file ?? [];
   if (!files.length) throw new Error(`This ${contentType} has no downloadable file attachment.`);
 
+  if (options.fileIndex != null && options.fileIndex >= files.length) throw new Error(`fileIndex exceeds this item's ${files.length} attachments.`);
   const extracted = [];
-  for (const file of files) {
-    const attachmentId = (String(file.download_path).match(/attachment\/(\d+)\//) || [])[1];
-    if (!attachmentId) throw new Error(`Could not identify the attachment for ${file.title}.`);
-    // The docviewer page exposes a signed, public files-cdn URL (the internal
-    // api.lms.fcps.edu download host has no public DNS, so we can't use it directly).
-    const viewer = await (await raw(`${BASE}/attachment/${attachmentId}/docviewer`, { redirect: "follow", headers: { Accept: "text/html" } })).text();
-    const match = viewer.replace(/\\\//g, "/").match(/https:\/\/files-cdn\.schoology\.com\/[^\s"'<>\\)]+/);
-    if (!match) throw new Error(`Could not resolve a readable PDF for ${file.title} (it may be image-only or unconverted).`);
-    const buffer = Buffer.from(await (await fetch(match[0].replace(/&amp;/g, "&"))).arrayBuffer());
-    let text = "";
+  const visuals = [];
+  let remainingImages = options.pageCount;
+  for (const [fileIndex, file] of files.entries()) {
+    if (options.fileIndex != null && options.fileIndex !== fileIndex) continue;
     try {
-      const { extractText } = await import("unpdf");
-      const result = await extractText(new Uint8Array(buffer), { mergePages: true });
-      text = (typeof result.text === "string" ? result.text : (result.text || []).join("\n")).replace(/\s+\n/g, "\n").trim();
-    } catch (e) {
-      throw new Error(`PDF text extraction failed for ${file.title}: ${e?.message || e}`);
+      const attachmentId = (String(file.download_path).match(/attachment\/(\d+)\//) || [])[1];
+      if (!attachmentId) throw new Error("Could not identify the attachment.");
+      // The API's download host has no public DNS. The authenticated viewer
+      // exposes a signed Schoology CDN URL for PDFs and original image files.
+      const viewerResponse = await raw(`${BASE}/attachment/${attachmentId}/docviewer`, { redirect: "follow", headers: { Accept: "text/html" } });
+      if (!viewerResponse.ok) throw new Error(`Attachment viewer failed (HTTP ${viewerResponse.status}).`);
+      const viewer = (await viewerResponse.text()).replace(/\\\//g, "/");
+      const match = viewer.match(/https:\/\/files-cdn\.schoology\.com\/[^\s"'<>\\)]+/);
+      const imagePath = viewer.match(/href=["']((?:https:\/\/lms\.fcps\.edu)?\/system\/files\/attachments\/[^"'<>]+)["']/);
+      let buffer;
+      if (match) buffer = await downloadAttachment(decodeEntities(match[0]));
+      else if (imagePath) {
+        const response = await raw(new URL(decodeEntities(imagePath[1]), BASE).href, { redirect: "manual", signal: AbortSignal.timeout(20000) });
+        buffer = response.status >= 300 && response.status < 400
+          ? await downloadAttachment(new URL(response.headers.get("location"), BASE).href)
+          : await readAttachmentResponse(response);
+      } else throw new Error("No PDF or image is available from Schoology's document viewer.");
+      const includeImages = options.includeImages && remainingImages > 0;
+      const result = await readAttachment(buffer, { ...options, includeImages, pageCount: Math.max(1, remainingImages) });
+      const renderedPages = result.images.map((image) => image.page);
+      remainingImages -= result.images.length;
+      for (const image of result.images) {
+        visuals.push({ type: "text", text: `Attachment ${fileIndex}: ${file.title} — page ${image.page} of ${result.totalPages}` });
+        visuals.push({ type: "image", data: image.data, mimeType: image.mimeType });
+      }
+      const nextPage = includeImages ? result.nextPage : options.includeImages ? options.startPage : result.textTruncated ? options.startPage + options.pageCount : null;
+      extracted.push({
+        fileIndex, title: file.title, chars: result.text.length, text: result.text,
+        totalPages: result.totalPages, renderedPages, textTruncated: result.textTruncated,
+        readWith: { tool: "schoology_read_document", sectionId, documentId: String(contentId), fileIndex },
+        ...(result.warnings ? { warnings: result.warnings } : {}),
+        ...(!result.text ? { note: "No text layer. Inspect the returned image content to read the scan, picture, or diagram." } : {}),
+        ...(nextPage ? { nextReadWith: { tool: "schoology_read_document", sectionId, documentId: String(contentId), fileIndex, startPage: nextPage, pageCount: options.pageCount, includeImages: options.includeImages } } : {}),
+      });
+    } catch (error) {
+      extracted.push({ fileIndex, title: file.title, chars: 0, text: "", error: String(error.message).replace(/https?:\/\/\S+/g, "[URL]") });
     }
-    if (!text) text = "(No extractable text — this attachment is likely a scanned image; OCR is not available.)";
-    extracted.push({ title: file.title, chars: text.length, text });
   }
-
-  const text = extracted.map((file) => `# ${file.title}\n\n${file.text}`).join("\n\n").slice(0, 45000);
-  return {
+  if (extracted.every((file) => file.error)) throw new Error(extracted.map((file) => `${file.title}: ${file.error}`).join("; "));
+  const combinedText = extracted.map((file) => `# ${file.title}\n\n${file.error ? `Error: ${file.error}` : file.text}`).join("\n\n");
+  const text = combinedText.slice(0, 45000);
+  return [{ type: "text", text: JSON.stringify({
     documentId: String(contentId), type: contentType, title: content.title,
-    files: extracted.map(({ title, chars }) => ({ title, chars })), chars: text.length, text,
-  };
+    files: extracted.map(({ text, ...metadata }) => metadata), chars: text.length, text,
+    textTruncated: combinedText.length > text.length || extracted.some((file) => file.textTruncated),
+    visualNote: options.includeImages ? "Images follow this metadata in attachment/page order. Read diagrams, charts, equations, tables, and scans visually. Follow each file's nextReadWith for remaining pages or attachments." : "Images disabled. Text extraction cannot describe diagrams or scans; use includeImages=true to inspect them.",
+  }, null, 2) }, ...visuals];
 }
 
 function jsonVariable(html, name) {
@@ -720,7 +748,13 @@ export const TOOLS = [
   { name: "schoology_list_sections", description: "List enrolled Schoology sections with official StudentVUE course grades.", inputSchema: emptySchema },
   { name: "schoology_get_assignments", description: "List Schoology assignments with submission status (submitted, not submitted, or unknown), attachments, and matched StudentVUE scores.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty } } },
   { name: "schoology_get_materials", description: "List a course's nested folders, documents, pages, and assignments.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
-  { name: "schoology_read_document", description: "Read text from a Schoology document or assignment attachment.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty, documentId: idProperty }, required: ["sectionId", "documentId"] } },
+  { name: "schoology_read_document", description: "Read Schoology documents and assignment attachments as text plus actual page images. Preserves diagrams, charts, equations, tables, photos, and scanned pages. Returns up to 3 images per call with nextReadWith for remaining pages/files. Supports PDFs, converted DOCX/PPTX, and image attachments.", inputSchema: { type: "object", additionalProperties: false, properties: {
+    sectionId: idProperty, documentId: idProperty,
+    fileIndex: { type: "integer", minimum: 0, maximum: 999, description: "Optional zero-based attachment index; omit to read all attachments." },
+    startPage: { type: "integer", minimum: 1, maximum: 10000, default: 1, description: "First page to show. Later pages also focus the text on the requested range." },
+    pageCount: { type: "integer", minimum: 1, maximum: 3, default: 3, description: "Maximum page images across all attachments in this response." },
+    includeImages: { type: "boolean", default: true, description: "Return actual image content for visual understanding. Set false for text-only clients." },
+  }, required: ["sectionId", "documentId"] } },
   { name: "schoology_get_upcoming_events", description: "Get upcoming Schoology events within 1 to 180 days.", inputSchema: { type: "object", additionalProperties: false, properties: { days: { type: "integer", minimum: 1, maximum: 180 } } } },
   { name: "schoology_get_calendar", description: "Get Schoology calendar events between two ISO dates.", inputSchema: { type: "object", additionalProperties: false, properties: { start: { type: "string", format: "date" }, end: { type: "string", format: "date" } } } },
   { name: "schoology_get_recent_activity", description: "Get account-wide Schoology announcements and course updates.", inputSchema: emptySchema },
@@ -763,8 +797,13 @@ export function validateToolCall(name, value = {}) {
     return { sectionId: requireId(value.sectionId, "sectionId") };
   }
   if (name === "schoology_read_document") {
-    onlyKeys(value, ["sectionId", "documentId"]);
-    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId") };
+    onlyKeys(value, ["sectionId", "documentId", "fileIndex", "startPage", "pageCount", "includeImages"]);
+    const { fileIndex, startPage = 1, pageCount = 3, includeImages = true } = value;
+    if (fileIndex != null && (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex > 999)) throw new Error("fileIndex must be an integer from 0 to 999.");
+    if (!Number.isInteger(startPage) || startPage < 1 || startPage > 10000) throw new Error("startPage must be an integer from 1 to 10000.");
+    if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 3) throw new Error("pageCount must be an integer from 1 to 3.");
+    if (typeof includeImages !== "boolean") throw new Error("includeImages must be a boolean.");
+    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId"), fileIndex, startPage, pageCount, includeImages };
   }
   if (name === "schoology_get_upcoming_events") {
     onlyKeys(value, ["days"]);
@@ -802,7 +841,7 @@ export async function callTool(name, value = {}) {
   else if (name === "schoology_list_sections") data = await getSectionsWithGrades();
   else if (name === "schoology_get_assignments") data = await getAssignmentsWithGrades(args.sectionId);
   else if (name === "schoology_get_materials") data = await getMaterials(args.sectionId);
-  else if (name === "schoology_read_document") data = await readDocument(args.sectionId, args.documentId);
+  else if (name === "schoology_read_document") return readDocument(args.sectionId, args.documentId, args);
   else if (name === "schoology_get_upcoming_events") data = await getUpcoming(args.days);
   else if (name === "schoology_get_calendar") data = await getCalendar(args.start, args.end);
   else if (name === "schoology_get_recent_activity") data = await getRecent();

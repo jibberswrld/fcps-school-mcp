@@ -27,6 +27,7 @@ export function createServer({ ion = false } = {}) {
       instructions:
         "Use Schoology for courses, materials, events, and updates. Use StudentVUE for official grades."
         + (ion ? " Use Ion (the TJHSST intranet) for the bell schedule, school announcements, eighth period blocks and activities, and eighth period signups." : "")
+        + " schoology_read_document returns text plus page images: inspect those images for diagrams, charts, tables, equations, and scans, and follow nextReadWith for remaining pages or attachments."
         + " If a tool reports a login problem, call school_check_login before retrying.",
     },
   );

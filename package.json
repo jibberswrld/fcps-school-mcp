@@ -7,14 +7,14 @@
     "fcps-school-mcp": "src/cli.js"
   },
   "scripts": {
-    "check": "node --check api/mcp.js && node --check src/cli.js && node --check src/config.js && node --check src/deploy.js && node --check src/fcps.js && node --check src/ion.js && node --check src/server.js && node --check src/setup.js",
+    "check": "node --check api/mcp.js && node --check src/cli.js && node --check src/config.js && node --check src/deploy.js && node --check src/documents.js && node --check src/fcps.js && node --check src/ion.js && node --check src/server.js && node --check src/setup.js",
     "deploy": "node src/cli.js deploy",
     "start": "node src/cli.js",
     "setup": "node src/cli.js setup",
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "files": [
     "api",
@@ -42,6 +42,7 @@
   "homepage": "https://github.com/jibberswrld/fcps-school-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "unpdf": "1.8.1"
+    "@napi-rs/canvas": "1.0.13",
+    "pdfjs-dist": "6.4.299"
   }
 }
