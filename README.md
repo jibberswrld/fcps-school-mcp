@@ -5,7 +5,7 @@
 ### Schoology, StudentVUE, and TJHSST Ion, directly inside your AI assistant.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-111827.svg)](LICENSE)
-[![Node 22+](https://img.shields.io/badge/node-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node 22.13+](https://img.shields.io/badge/node-22.13%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-ready-6C47FF)](https://modelcontextprotocol.io/)
 
 Local or self-hosted · No developer keys · No shared database · No developer-operated backend
@@ -18,7 +18,7 @@ An unofficial, open-source [Model Context Protocol](https://modelcontextprotocol
 
 > **One-command setup**
 >
-> You need [Node.js 22 or newer](https://nodejs.org/), an FCPS student account, and a free [Vercel account](https://vercel.com/signup). Run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
+> You need [Node.js 22.13 or newer](https://nodejs.org/), an FCPS student account, and a free [Vercel account](https://vercel.com/signup). Run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
 >
 > ```bash
 > npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.2.0.tar.gz fcps-school-mcp deploy
@@ -34,7 +34,7 @@ Your FCPS username, password, and URL key are sent directly to your Vercel proje
 
 ## Local-only setup
 
-You need [Node.js 22 or newer](https://nodejs.org/) and an existing FCPS student account. Then run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
+You need [Node.js 22.13 or newer](https://nodejs.org/) and an existing FCPS student account. Then run this in PowerShell, Command Prompt, Terminal, or any Linux shell:
 
 ```bash
 npx --yes --allow-remote=all --ignore-scripts --package=https://github.com/jibberswrld/fcps-school-mcp/archive/refs/tags/v1.2.0.tar.gz fcps-school-mcp setup
@@ -51,7 +51,8 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 - Merge official StudentVUE scores into Schoology course and assignment results.
 - List Schoology courses, assignments, due dates, calendar events, and announcements.
 - Browse nested course-material folders, pages, documents, and assignment attachments.
-- Extract readable text from Schoology PDF, DOCX, and PPTX attachments after Schoology converts them to PDF.
+- Read Schoology PDF, DOCX, and PPTX attachments as text **and page images**, preserving diagrams, charts, equations, tables, and scanned worksheets. DOCX/PPTX files use Schoology’s PDF conversion.
+- View PNG, JPEG, and other supported image attachments directly, including drawings and photos.
 - For TJHSST students with Ion connected: read the bell schedule, school announcements, eighth period blocks and activities, your own signups, and sign you up for an eighth period activity.
 
 ## Available tools
@@ -62,7 +63,7 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 | `schoology_list_sections` | Courses with official StudentVUE grades |
 | `schoology_get_assignments` | Assignments, submission status, attachments, and matched scores |
 | `schoology_get_materials` | Course folders, pages, files, and assignments |
-| `schoology_read_document` | Text from documents and assignment attachments |
+| `schoology_read_document` | Text plus page images from documents and assignment attachments |
 | `schoology_get_upcoming_events` | Upcoming deadlines and events |
 | `schoology_get_calendar` | Calendar events between two dates |
 | `schoology_get_recent_activity` | Account-wide announcements and updates |
@@ -139,9 +140,17 @@ Fully quit and reopen the MCP client. If your client was not detected, use the m
 
 Ask your assistant to run `school_check_login`. It tries Schoology, StudentVUE, and Ion and returns the exact reason for each failure, for example the message FCPS returned. A pause means FCPS or Ion rejected the password; re-run the setup command with the correct one. The pause is intentional because repeated FCPS login failures can lock an account.
 
+**Reading diagrams, scans, and longer documents**
+
+`schoology_read_document` returns actual MCP image content alongside the existing text metadata. A vision-capable assistant can inspect diagrams, graph axes, formulas, handwriting, and scanned pages directly; the server does not send files to a separate OCR or AI service. The client must support image tool results and a vision-capable model.
+
+Calls using only `sectionId` and `documentId` keep working and now include up to **three page images across all attachments**. Images are labeled with their attachment index and page number. Each file reports `totalPages`, `renderedPages`, and exact `nextReadWith` arguments for omitted pages or attachments. Use `fileIndex` (zero-based), `startPage` (one-based), and `pageCount` (1–3) to inspect a particular attachment or continue through a longer file. Set `includeImages: false` for a text-only client.
+
+Text is capped at 45,000 characters and the first 200 pages on an initial read, and reports `textTruncated` when shortened. A `startPage` greater than 1 focuses the returned text on that page range. Each file's `readWith` arguments let you read it separately if the combined text is truncated. Images are scaled to at most 1,800 pixels on the longest side and 1 MB each; downloads are limited to 25 MB. An unreadable attachment is reported per file while other attachments remain available. Refresh your MCP client's tool definitions if the new page controls are missing.
+
 **A document has no extractable text**
 
-The file is probably a scan or image-only PDF. OCR is not included.
+The file is probably a scan or image-only PDF. Its page images are still returned for your assistant to read visually. In text-only mode, enable `includeImages` to inspect it.
 
 **Remove saved credentials**
 

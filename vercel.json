@@ -3,7 +3,8 @@
   "framework": null,
   "functions": {
     "api/mcp.js": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "node_modules/pdfjs-dist/**"
     }
   },
   "rewrites": [
