@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { authState, fcpsStatus } from "../src/fcps.js";
+import { authState, callTool, fcpsStatus } from "../src/fcps.js";
 
 // Simulates FCPS without touching the network: Schoology and StudentVUE report
 // "not signed in", the SSO landing pages carry no SAML form, and ForgeRock
@@ -72,6 +72,34 @@ test("a rejected password pauses logins with the reason FCPS gave", async () => 
     assert.equal(stage, 2, "exactly one credential submission, then stop");
     assert.equal(calls.filter((call) => call.url.includes("aic.fcps.edu")).length, 2);
     assert.match(authState().reason, /rejected/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a hidden Grade Book fails fast without re-login and leaves Schoology sections working", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method || "GET" });
+    const { hostname, pathname } = new URL(url);
+    if (pathname === "/v1/users/me") return Response.json({ uid: 42, name_display: "Test Student" });
+    if (pathname === "/v1/users/42/sections") return Response.json({ section: [{ id: 7, section_title: "Period 1", course_title: "Physics", course_id: 9 }] });
+    if (hostname === "sisstudent.fcps.edu" && pathname.endsWith("/PXP2_Gradebook.aspx")) return new Response(null, { status: 302, headers: { location: "/svue/Home_PXP2.aspx" } });
+    return new Response("unexpected", { status: 500 });
+  };
+  try {
+    const status = await fcpsStatus();
+    assert.equal(status.schoology.ok, true);
+    assert.equal(status.studentVue.ok, false);
+    assert.match(status.studentVue.error, /turned the Grade Book off/);
+    assert.equal(calls.filter((call) => call.url.includes("aic.fcps.edu")).length, 0, "a hidden Grade Book must not trigger a ForgeRock login");
+
+    const [content] = await callTool("schoology_list_sections");
+    const sections = JSON.parse(content.text);
+    assert.equal(sections[0].courseTitle, "Physics");
+    assert.equal(sections[0].officialGrade, null);
+    assert.match(sections[0].officialGradeError, /turned the Grade Book off/);
   } finally {
     globalThis.fetch = originalFetch;
   }
