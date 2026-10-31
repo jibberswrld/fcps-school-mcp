@@ -26,6 +26,11 @@ const S = { jar: [], uid: null, pausedUntil: 0, pauseReason: "", loaded: false }
 class CredentialsRejectedError extends Error {
   constructor(message, lockout = false) { super(message); this.name = "CredentialsRejectedError"; this.lockout = lockout; }
 }
+// Signed in, but FCPS has hidden the Grade Book (it does this during
+// end-of-quarter grading). Logging in again cannot fix it, so it is not retried.
+class GradebookUnavailableError extends Error {
+  constructor() { super("StudentVUE is signed in, but FCPS has turned the Grade Book off right now (it usually does this while grades are being finalized). Schoology data is unaffected; try StudentVUE grades again later."); this.name = "GradebookUnavailableError"; }
+}
 
 // The cookie jar is cached on disk (local installs only; the file is 0600) so a
 // client restart reuses the session instead of logging into FCPS again. Fewer
@@ -216,6 +221,7 @@ async function withLogin(service, attempt) {
       return result;
     } catch (error) {
       if (error instanceof CredentialsRejectedError) { pauseLogins(error); throw error; }
+      if (error instanceof GradebookUnavailableError) throw error;
       lastError = error;
       clearCookies();
     }
@@ -266,6 +272,8 @@ async function completeStudentVueSaml() {
 
 async function studentVueShell() {
   const res = await raw(`${STUDENTVUE_BASE}/PXP2_Gradebook.aspx?AGU=0`, { headers: { Accept: "text/html" } });
+  // Signed-out sessions go to Login_PXP.aspx; signed-in ones bounce Home when the Grade Book is off.
+  if (/Home_PXP2\.aspx/i.test(res.headers.get("location") || "")) throw new GradebookUnavailableError();
   if (res.status < 200 || res.status >= 300) return null;
   const body = await res.text();
   return /PXP\.GBCurrentFocus\s*=/.test(body) ? body : null;
@@ -278,7 +286,7 @@ async function ensureStudentVueAuthed() {
   return withLogin("StudentVUE", async (fresh) => {
     let shell = null;
     if (!fresh) {
-      try { await completeStudentVueSaml(); shell = await studentVueShell(); } catch {}
+      try { await completeStudentVueSaml(); shell = await studentVueShell(); } catch (error) { if (error instanceof GradebookUnavailableError) throw error; }
     }
     if (!shell) {
       await forgerockAuth();
@@ -664,7 +672,8 @@ function matchingCourse(courses, title) {
 }
 
 async function getSectionsWithGrades() {
-  const [sections, grades] = await Promise.all([getSections(), getStudentVueGrades()]);
+  const [sections, grades] = await Promise.all([getSections(), getStudentVueGrades().catch((error) => ({ error }))]);
+  if (grades.error) return sections.map((section) => ({ ...section, officialGrade: null, officialGradeError: grades.error.message }));
   return sections.map((section) => {
     const grade = matchingCourse(grades.classes, section.courseTitle || section.title);
     return {
@@ -686,8 +695,9 @@ async function getAssignmentsWithGrades(sectionId) {
   const selectedSections = sectionId ? sections.filter((section) => section.id === String(sectionId)) : sections;
   const [schoologyAssignments, studentVue] = await Promise.all([
     getAssignments(sectionId),
-    getStudentVueAssignments(),
+    getStudentVueAssignments().catch((error) => ({ error })),
   ]);
+  if (studentVue.error) return schoologyAssignments.map((assignment) => ({ ...assignment, source: "Schoology", officialGradeError: studentVue.error.message }));
   const matchedStudentVueIds = new Set();
   const assignments = schoologyAssignments.map((assignment) => {
     const section = selectedSections.find((item) => item.id === assignment.sectionId);
