@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { configRoot, loadCredentials } from "./config.js";
@@ -29,7 +30,7 @@ class CredentialsRejectedError extends Error {
 // Signed in, but FCPS has hidden the Grade Book (it does this during
 // end-of-quarter grading). Logging in again cannot fix it, so it is not retried.
 class GradebookUnavailableError extends Error {
-  constructor() { super("StudentVUE is signed in, but FCPS has turned the Grade Book off right now (it usually does this while grades are being finalized). Schoology data is unaffected; try StudentVUE grades again later."); this.name = "GradebookUnavailableError"; }
+  constructor() { super("StudentVUE is signed in, but FCPS has turned the Grade Book off right now (it usually does this while grades are being finalized). Schoology data is unaffected. Past final grades, GPA, credits, and the transcript are still available from studentvue_get_course_history or studentvue_get_grades."); this.name = "GradebookUnavailableError"; }
 }
 
 // The cookie jar is cached on disk (local installs only; the file is 0600) so a
@@ -279,24 +280,33 @@ async function studentVueShell() {
   return /PXP\.GBCurrentFocus\s*=/.test(body) ? body : null;
 }
 
-async function ensureStudentVueAuthed() {
+// Signed-out StudentVUE pages redirect to Login_PXP.aspx, so any 2xx is the page itself.
+async function studentVuePage(page) {
+  const res = await raw(`${STUDENTVUE_BASE}/${page}`, { headers: { Accept: "text/html" } });
+  return res.status >= 200 && res.status < 300 ? res.text() : null;
+}
+
+// Loads a StudentVUE page, signing in (with the lockout rules) when the session is gone.
+async function ensureStudentVue(load, what) {
   await loadSession();
-  const existing = await studentVueShell();
+  const existing = await load();
   if (existing) return existing;
   return withLogin("StudentVUE", async (fresh) => {
-    let shell = null;
+    let result = null;
     if (!fresh) {
-      try { await completeStudentVueSaml(); shell = await studentVueShell(); } catch (error) { if (error instanceof GradebookUnavailableError) throw error; }
+      try { await completeStudentVueSaml(); result = await load(); } catch (error) { if (error instanceof GradebookUnavailableError) throw error; }
     }
-    if (!shell) {
+    if (!result) {
       await forgerockAuth();
       await completeStudentVueSaml();
-      shell = await studentVueShell();
+      result = await load();
     }
-    if (!shell) throw new Error("FCPS sign-in succeeded but StudentVUE did not open the gradebook.");
-    return shell;
+    if (!result) throw new Error(`FCPS sign-in succeeded but StudentVUE did not open ${what}.`);
+    return result;
   });
 }
+
+const ensureStudentVueAuthed = () => ensureStudentVue(studentVueShell, "the gradebook");
 
 // Diagnostic: tries each service and reports exactly why a login fails.
 export async function fcpsStatus() {
@@ -690,6 +700,89 @@ async function getSectionsWithGrades() {
   });
 }
 
+const htmlText = (html) => decodeEntities(String(html).replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+const htmlCells = (row, tag) => [...row.matchAll(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "gi"))].map((m) => htmlText(m[1]));
+
+async function getCourseHistory() {
+  const html = await ensureStudentVue(() => studentVuePage("PXP2_CourseHistory.aspx?AGU=0"), "Course History");
+  const history = jsonArrayAfter(html, "PXP.CourseHistory").map((year) => ({
+    gradeLevel: year.Grade,
+    terms: (year.Terms ?? []).map((term) => ({
+      year: term.Year, term: term.TermName, school: term.SchoolName,
+      courses: (term.Courses ?? []).map((course) => ({
+        courseId: course.CourseID, title: course.CourseTitle, mark: course.Mark,
+        creditsAttempted: Number(course.CreditsAttempted) || 0, creditsCompleted: Number(course.CreditsCompleted) || 0,
+      })),
+    })),
+  }));
+  // The plain credits table is the one whose header reads Subject Area / Required / Completed / In Progress / Remaining.
+  const table = [...html.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)].map((m) => m[1]).find((t) => /Required<\/th>/i.test(t)) || "";
+  const credits = [...(table.match(/<tbody>([\s\S]*?)<\/tbody>/i)?.[1] ?? "").matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map((m) => {
+    const [required, completed, inProgress, remaining] = htmlCells(m[1], "td").map(Number);
+    return { subjectArea: htmlCells(m[1], "th")[0], required, completed, inProgress, remaining };
+  });
+  const [, required, completed, inProgress, remaining] = htmlCells(table.match(/<tfoot>([\s\S]*?)<\/tfoot>/i)?.[1] ?? "", "td").map(Number);
+  const gpa = [...html.matchAll(/<div class="gpa">\s*<h2>([\s\S]*?)<\/h2>\s*<span class="gpa-score">([\s\S]*?)<\/span>/gi)]
+    .map((m) => ({ type: htmlText(m[1]), value: Number(htmlText(m[2])) }));
+  const testRequirements = [...html.matchAll(/<li data-status="([^"]*)"[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => ({
+    test: htmlText(m[2].match(/<span class="title">([\s\S]*?)<\/span>/i)?.[1] ?? ""),
+    status: m[1],
+    result: htmlText(m[2].match(/<span class="performance-level">([\s\S]*?)<\/span>/i)?.[1] ?? ""),
+    date: htmlText(m[2].match(/<span class="date">([\s\S]*?)<\/span>\s*<\/div>/i)?.[1] ?? "").replace(/^taken on\s*/i, ""),
+  }));
+  return {
+    system: "FCPS SIS StudentVUE",
+    classOf: htmlText(html.match(/<span class="class-of">([\s\S]*?)<\/span>/i)?.[1] ?? "").replace(/^Class of\s*/i, ""),
+    diplomaType: htmlText(html.match(/Diploma Type<\/h4>\s*<h6[^>]*>([\s\S]*?)<\/h6>/i)?.[1] ?? ""),
+    gpa, credits, creditTotals: { required, completed, inProgress, remaining }, testRequirements, history,
+  };
+}
+
+// FCPS posts report cards and score reports after the year they cover, by late summer at the latest.
+function schoolYearOf(date) {
+  const [month, , year] = String(date).split("/").map(Number);
+  if (!month || !year) return null;
+  const start = month >= 8 ? year : year - 1;
+  return `${start}-${String(start + 1).slice(2)}`;
+}
+
+// Document links carry a per-login token, so tools address documents by a hash of their stable fields.
+async function getStudentVueDocuments() {
+  const html = await ensureStudentVue(() => studentVuePage("PXP2_Documents.aspx?AGU=0"), "Documents");
+  let rows = [];
+  for (let at = html.indexOf('"dataSource":'); at >= 0 && !rows.length; at = html.indexOf('"dataSource":', at + 1)) {
+    const list = jsonArrayAfter(html.slice(at), '"dataSource":');
+    if (list.some((row) => "DocumentTitle" in row)) rows = list;
+  }
+  return rows.map((row) => {
+    const title = htmlText(row.DocumentTitle), href = row.DocumentTitle.match(/href="([^"]+)"/i)?.[1];
+    return {
+      documentId: createHash("sha256").update(`${row.DocumentUploadDate}|${row.DocumentCategory}|${title}`).digest("hex").slice(0, 16),
+      title, category: row.DocumentCategory, uploaded: row.DocumentUploadDate, schoolYear: schoolYearOf(row.DocumentUploadDate),
+      url: href ? new URL(decodeEntities(href), `${STUDENTVUE_BASE}/`).href : null,
+    };
+  });
+}
+
+async function readStudentVueDocument(documentId, options) {
+  const doc = (await getStudentVueDocuments()).find((item) => item.documentId === documentId);
+  if (!doc) throw new Error(`No StudentVUE document ${documentId}. Call studentvue_list_documents for current IDs.`);
+  if (!doc.url) throw new Error(`StudentVUE lists "${doc.title}" without a download link.`);
+  const result = await readAttachment(await readAttachmentResponse(await raw(doc.url, { signal: AbortSignal.timeout(20000) })), options);
+  const nextPage = options.includeImages ? result.nextPage : result.textTruncated ? options.startPage + options.pageCount : null;
+  const text = result.text.slice(0, 45000);
+  return [{ type: "text", text: JSON.stringify({
+    documentId, title: doc.title, category: doc.category, uploaded: doc.uploaded,
+    totalPages: result.totalPages, renderedPages: result.images.map((image) => image.page),
+    chars: text.length, text, textTruncated: result.textTruncated || result.text.length > text.length,
+    ...(!result.text ? { note: "No text layer. Inspect the returned page images to read it." } : {}),
+    ...(nextPage ? { nextReadWith: { tool: "studentvue_read_document", documentId, startPage: nextPage, pageCount: options.pageCount, includeImages: options.includeImages } } : {}),
+  }, null, 2) }, ...result.images.flatMap((image) => [
+    { type: "text", text: `${doc.title} — page ${image.page} of ${result.totalPages}` },
+    { type: "image", data: image.data, mimeType: image.mimeType },
+  ])];
+}
+
 async function getAssignmentsWithGrades(sectionId) {
   const sections = await getSections();
   const selectedSections = sectionId ? sections.filter((section) => section.id === String(sectionId)) : sections;
@@ -769,8 +862,16 @@ export const TOOLS = [
   { name: "schoology_get_calendar", description: "Get Schoology calendar events between two ISO dates.", inputSchema: { type: "object", additionalProperties: false, properties: { start: { type: "string", format: "date" }, end: { type: "string", format: "date" } } } },
   { name: "schoology_get_recent_activity", description: "Get account-wide Schoology announcements and course updates.", inputSchema: emptySchema },
   { name: "schoology_get_section_updates", description: "Get recent posts for one Schoology section.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
-  { name: "studentvue_get_grades", description: "Get official current course marks and percentages from FCPS StudentVUE.", inputSchema: emptySchema },
+  { name: "studentvue_get_grades", description: "Get official current course marks and percentages from FCPS StudentVUE. While FCPS hides the Grade Book, returns the student's transcript (past final marks, GPA, credits) instead.", inputSchema: emptySchema },
   { name: "studentvue_get_assignments", description: "Get official assignment grades from FCPS StudentVUE, optionally filtered by class or title.", inputSchema: { type: "object", additionalProperties: false, properties: { classId: idProperty, query: { type: "string", maxLength: 200 } } } },
+  { name: "studentvue_get_course_history", description: "Get the student's high school transcript from FCPS StudentVUE: every course that earns high school credit, with final mark and credits by grade level, year, term, and school, plus cumulative GPA, credits earned versus diploma requirements by subject area, diploma type, and graduation test requirements. Only high-school-credit courses appear: entries under a middle school grade level are individual courses taken early (for example Algebra 1 in grade 8, sometimes transferred from another school), not that year's full record. Elementary and full middle school grades are only in report cards from studentvue_list_documents.", inputSchema: emptySchema },
+  { name: "studentvue_list_documents", description: "List StudentVUE documents, including report cards from past years and test score reports (SOL, MAP). schoolYear is estimated from the upload date; titles do not reliably name the grade, so read the document for its grade level. Returns documentId values for studentvue_read_document.", inputSchema: emptySchema },
+  { name: "studentvue_read_document", description: "Read a StudentVUE document such as a report card or test score report, as text plus actual page images. Returns up to 3 page images per call with nextReadWith for later pages.", inputSchema: { type: "object", additionalProperties: false, properties: {
+    documentId: { type: "string", pattern: "^[0-9a-f]{16}$", description: "documentId from studentvue_list_documents." },
+    startPage: { type: "integer", minimum: 1, maximum: 10000, default: 1 },
+    pageCount: { type: "integer", minimum: 1, maximum: 3, default: 3 },
+    includeImages: { type: "boolean", default: true, description: "Return actual page images. Set false for text-only clients." },
+  }, required: ["documentId"] } },
 ];
 
 function requireId(value, name) {
@@ -791,6 +892,13 @@ function optionalDate(value, name) {
   return value;
 }
 
+function pagingOptions({ startPage = 1, pageCount = 3, includeImages = true }) {
+  if (!Number.isInteger(startPage) || startPage < 1 || startPage > 10000) throw new Error("startPage must be an integer from 1 to 10000.");
+  if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 3) throw new Error("pageCount must be an integer from 1 to 3.");
+  if (typeof includeImages !== "boolean") throw new Error("includeImages must be a boolean.");
+  return { startPage, pageCount, includeImages };
+}
+
 function onlyKeys(value, allowed) {
   const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
   if (unexpected.length) throw new Error(`Unexpected tool argument: ${unexpected[0]}.`);
@@ -808,12 +916,14 @@ export function validateToolCall(name, value = {}) {
   }
   if (name === "schoology_read_document") {
     onlyKeys(value, ["sectionId", "documentId", "fileIndex", "startPage", "pageCount", "includeImages"]);
-    const { fileIndex, startPage = 1, pageCount = 3, includeImages = true } = value;
+    const { fileIndex } = value;
     if (fileIndex != null && (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex > 999)) throw new Error("fileIndex must be an integer from 0 to 999.");
-    if (!Number.isInteger(startPage) || startPage < 1 || startPage > 10000) throw new Error("startPage must be an integer from 1 to 10000.");
-    if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 3) throw new Error("pageCount must be an integer from 1 to 3.");
-    if (typeof includeImages !== "boolean") throw new Error("includeImages must be a boolean.");
-    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId"), fileIndex, startPage, pageCount, includeImages };
+    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId"), fileIndex, ...pagingOptions(value) };
+  }
+  if (name === "studentvue_read_document") {
+    onlyKeys(value, ["documentId", "startPage", "pageCount", "includeImages"]);
+    if (!/^[0-9a-f]{16}$/.test(String(value.documentId ?? ""))) throw new Error("documentId must be a 16-character id from studentvue_list_documents.");
+    return { documentId: value.documentId, ...pagingOptions(value) };
   }
   if (name === "schoology_get_upcoming_events") {
     onlyKeys(value, ["days"]);
@@ -836,7 +946,7 @@ export function validateToolCall(name, value = {}) {
     if (query && query.length > 200) throw new Error("query must be at most 200 characters.");
     return { classId: optionalId(value.classId, "classId"), query };
   }
-  if (["schoology_get_profile", "schoology_list_sections", "schoology_get_recent_activity", "studentvue_get_grades"].includes(name)) {
+  if (["schoology_get_profile", "schoology_list_sections", "schoology_get_recent_activity", "studentvue_get_grades", "studentvue_get_course_history", "studentvue_list_documents"].includes(name)) {
     onlyKeys(value, []);
     return {};
   }
@@ -856,7 +966,13 @@ export async function callTool(name, value = {}) {
   else if (name === "schoology_get_calendar") data = await getCalendar(args.start, args.end);
   else if (name === "schoology_get_recent_activity") data = await getRecent();
   else if (name === "schoology_get_section_updates") data = await getSectionUpdates(args.sectionId);
-  else if (name === "studentvue_get_grades") data = await getStudentVueGrades();
+  else if (name === "studentvue_get_grades") data = await getStudentVueGrades().catch(async (error) => {
+    if (!(error instanceof GradebookUnavailableError)) throw error;
+    return { gradebookAvailable: false, message: error.message, courseHistory: await getCourseHistory() };
+  });
   else if (name === "studentvue_get_assignments") data = await getStudentVueAssignments(args.classId, args.query);
+  else if (name === "studentvue_get_course_history") data = await getCourseHistory();
+  else if (name === "studentvue_list_documents") data = (await getStudentVueDocuments()).map(({ url, ...doc }) => doc);
+  else if (name === "studentvue_read_document") return readStudentVueDocument(args.documentId, args);
   return [{ type: "text", text: JSON.stringify(data, null, 2) }];
 }

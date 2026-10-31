@@ -47,6 +47,7 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 ## What it can do
 
 - Show current StudentVUE grades, percentages, categories, and assignment scores.
+- Show full course history, cumulative GPA, credits earned toward the diploma, and past report cards.
 - Report whether each Schoology assignment has been submitted, when, and whether it was late.
 - Merge official StudentVUE scores into Schoology course and assignment results.
 - List Schoology courses, assignments, due dates, calendar events, and announcements.
@@ -70,6 +71,9 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 | `schoology_get_section_updates` | Updates for one course |
 | `studentvue_get_grades` | Official current course marks and percentages |
 | `studentvue_get_assignments` | Official assignment grades and category weights |
+| `studentvue_get_course_history` | Past courses with final marks and credits, GPA, and credits toward the diploma |
+| `studentvue_list_documents` | Report cards from past years and test score reports |
+| `studentvue_read_document` | Text and page images from a report card or score report |
 | `school_check_login` | Tests every login and reports exactly why one fails |
 
 TJHSST students who answered yes to the Ion question also get these tools:
