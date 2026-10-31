@@ -30,7 +30,7 @@ class CredentialsRejectedError extends Error {
 // Signed in, but FCPS has hidden the Grade Book (it does this during
 // end-of-quarter grading). Logging in again cannot fix it, so it is not retried.
 class GradebookUnavailableError extends Error {
-  constructor() { super("StudentVUE is signed in, but FCPS has turned the Grade Book off right now (it usually does this while grades are being finalized). Schoology data is unaffected; try StudentVUE grades again later."); this.name = "GradebookUnavailableError"; }
+  constructor() { super("StudentVUE is signed in, but FCPS has turned the Grade Book off right now (it usually does this while grades are being finalized). Schoology data is unaffected. Past final grades, GPA, credits, and the transcript are still available from studentvue_get_course_history or studentvue_get_grades."); this.name = "GradebookUnavailableError"; }
 }
 
 // The cookie jar is cached on disk (local installs only; the file is 0600) so a
@@ -862,7 +862,7 @@ export const TOOLS = [
   { name: "schoology_get_calendar", description: "Get Schoology calendar events between two ISO dates.", inputSchema: { type: "object", additionalProperties: false, properties: { start: { type: "string", format: "date" }, end: { type: "string", format: "date" } } } },
   { name: "schoology_get_recent_activity", description: "Get account-wide Schoology announcements and course updates.", inputSchema: emptySchema },
   { name: "schoology_get_section_updates", description: "Get recent posts for one Schoology section.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
-  { name: "studentvue_get_grades", description: "Get official current course marks and percentages from FCPS StudentVUE.", inputSchema: emptySchema },
+  { name: "studentvue_get_grades", description: "Get official current course marks and percentages from FCPS StudentVUE. While FCPS hides the Grade Book, returns the student's transcript (past final marks, GPA, credits) instead.", inputSchema: emptySchema },
   { name: "studentvue_get_assignments", description: "Get official assignment grades from FCPS StudentVUE, optionally filtered by class or title.", inputSchema: { type: "object", additionalProperties: false, properties: { classId: idProperty, query: { type: "string", maxLength: 200 } } } },
   { name: "studentvue_get_course_history", description: "Get the student's high school transcript from FCPS StudentVUE: every course that earns high school credit, with final mark and credits by grade level, year, term, and school, plus cumulative GPA, credits earned versus diploma requirements by subject area, diploma type, and graduation test requirements. Only high-school-credit courses appear: entries under a middle school grade level are individual courses taken early (for example Algebra 1 in grade 8, sometimes transferred from another school), not that year's full record. Elementary and full middle school grades are only in report cards from studentvue_list_documents.", inputSchema: emptySchema },
   { name: "studentvue_list_documents", description: "List StudentVUE documents, including report cards from past years and test score reports (SOL, MAP). schoolYear is estimated from the upload date; titles do not reliably name the grade, so read the document for its grade level. Returns documentId values for studentvue_read_document.", inputSchema: emptySchema },
@@ -966,7 +966,10 @@ export async function callTool(name, value = {}) {
   else if (name === "schoology_get_calendar") data = await getCalendar(args.start, args.end);
   else if (name === "schoology_get_recent_activity") data = await getRecent();
   else if (name === "schoology_get_section_updates") data = await getSectionUpdates(args.sectionId);
-  else if (name === "studentvue_get_grades") data = await getStudentVueGrades();
+  else if (name === "studentvue_get_grades") data = await getStudentVueGrades().catch(async (error) => {
+    if (!(error instanceof GradebookUnavailableError)) throw error;
+    return { gradebookAvailable: false, message: error.message, courseHistory: await getCourseHistory() };
+  });
   else if (name === "studentvue_get_assignments") data = await getStudentVueAssignments(args.classId, args.query);
   else if (name === "studentvue_get_course_history") data = await getCourseHistory();
   else if (name === "studentvue_list_documents") data = (await getStudentVueDocuments()).map(({ url, ...doc }) => doc);

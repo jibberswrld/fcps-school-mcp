@@ -84,3 +84,22 @@ test("studentvue_read_document validates its arguments", () => {
   assert.throws(() => validateToolCall("studentvue_read_document", { documentId: "0123456789abcdef", pageCount: 9 }), /pageCount/);
   assert.deepEqual(validateToolCall("studentvue_read_document", { documentId: "0123456789abcdef" }), { documentId: "0123456789abcdef", startPage: 1, pageCount: 3, includeImages: true });
 });
+
+test("studentvue_get_grades falls back to the transcript while the Grade Book is hidden", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const { pathname } = new URL(url);
+    if (pathname.endsWith("/PXP2_Gradebook.aspx")) return new Response(null, { status: 302, headers: { location: "/svue/Home_PXP2.aspx" } });
+    if (pathname.endsWith("/PXP2_CourseHistory.aspx")) return new Response(HISTORY, { status: 200 });
+    return new Response("unexpected", { status: 500 });
+  };
+  try {
+    const result = JSON.parse((await callTool("studentvue_get_grades"))[0].text);
+    assert.equal(result.gradebookAvailable, false);
+    assert.match(result.message, /studentvue_get_course_history/);
+    assert.deepEqual(result.courseHistory.gpa, [{ type: "Cumulative", value: 3.9 }]);
+    assert.equal(result.courseHistory.history[0].terms[0].courses[0].mark, "A-");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
