@@ -738,6 +738,14 @@ async function getCourseHistory() {
   };
 }
 
+// FCPS posts report cards and score reports after the year they cover, by late summer at the latest.
+function schoolYearOf(date) {
+  const [month, , year] = String(date).split("/").map(Number);
+  if (!month || !year) return null;
+  const start = month >= 8 ? year : year - 1;
+  return `${start}-${String(start + 1).slice(2)}`;
+}
+
 // Document links carry a per-login token, so tools address documents by a hash of their stable fields.
 async function getStudentVueDocuments() {
   const html = await ensureStudentVue(() => studentVuePage("PXP2_Documents.aspx?AGU=0"), "Documents");
@@ -750,7 +758,7 @@ async function getStudentVueDocuments() {
     const title = htmlText(row.DocumentTitle), href = row.DocumentTitle.match(/href="([^"]+)"/i)?.[1];
     return {
       documentId: createHash("sha256").update(`${row.DocumentUploadDate}|${row.DocumentCategory}|${title}`).digest("hex").slice(0, 16),
-      title, category: row.DocumentCategory, uploaded: row.DocumentUploadDate,
+      title, category: row.DocumentCategory, uploaded: row.DocumentUploadDate, schoolYear: schoolYearOf(row.DocumentUploadDate),
       url: href ? new URL(decodeEntities(href), `${STUDENTVUE_BASE}/`).href : null,
     };
   });
@@ -856,8 +864,8 @@ export const TOOLS = [
   { name: "schoology_get_section_updates", description: "Get recent posts for one Schoology section.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
   { name: "studentvue_get_grades", description: "Get official current course marks and percentages from FCPS StudentVUE.", inputSchema: emptySchema },
   { name: "studentvue_get_assignments", description: "Get official assignment grades from FCPS StudentVUE, optionally filtered by class or title.", inputSchema: { type: "object", additionalProperties: false, properties: { classId: idProperty, query: { type: "string", maxLength: 200 } } } },
-  { name: "studentvue_get_course_history", description: "Get the student's full FCPS course history: every past course with final mark and credits by grade level, year, and term, plus cumulative GPA, credits earned versus diploma requirements by subject area, diploma type, and graduation test requirements.", inputSchema: emptySchema },
-  { name: "studentvue_list_documents", description: "List StudentVUE documents, including report cards from past years and test score reports (SOL, MAP). Returns documentId values for studentvue_read_document.", inputSchema: emptySchema },
+  { name: "studentvue_get_course_history", description: "Get the student's high school transcript from FCPS StudentVUE: every course that earns high school credit, with final mark and credits by grade level, year, term, and school, plus cumulative GPA, credits earned versus diploma requirements by subject area, diploma type, and graduation test requirements. Only high-school-credit courses appear: entries under a middle school grade level are individual courses taken early (for example Algebra 1 in grade 8, sometimes transferred from another school), not that year's full record. Elementary and full middle school grades are only in report cards from studentvue_list_documents.", inputSchema: emptySchema },
+  { name: "studentvue_list_documents", description: "List StudentVUE documents, including report cards from past years and test score reports (SOL, MAP). schoolYear is estimated from the upload date; titles do not reliably name the grade, so read the document for its grade level. Returns documentId values for studentvue_read_document.", inputSchema: emptySchema },
   { name: "studentvue_read_document", description: "Read a StudentVUE document such as a report card or test score report, as text plus actual page images. Returns up to 3 page images per call with nextReadWith for later pages.", inputSchema: { type: "object", additionalProperties: false, properties: {
     documentId: { type: "string", pattern: "^[0-9a-f]{16}$", description: "documentId from studentvue_list_documents." },
     startPage: { type: "integer", minimum: 1, maximum: 10000, default: 1 },

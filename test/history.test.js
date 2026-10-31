@@ -68,6 +68,7 @@ test("documents are listed with stable ids and read through the per-login link",
     const [doc] = JSON.parse((await callTool("studentvue_list_documents"))[0].text);
     assert.equal(doc.title, "Final_2025-26_ExampleHS");
     assert.equal(doc.category, "Report Card");
+    assert.equal(doc.schoolYear, "2025-26");
     assert.match(doc.documentId, /^[0-9a-f]{16}$/);
     assert.equal(doc.url, undefined, "the per-login token link stays internal");
     await assert.rejects(callTool("studentvue_read_document", { documentId: doc.documentId }));
