@@ -16,7 +16,7 @@ import { createServer } from "../src/server.js";
 import { askCredentials, configureLocal, mergeClientConfig } from "../src/setup.js";
 
 test("exports the complete Schoology and StudentVUE tool set", () => {
-  assert.equal(TOOLS.length, 11);
+  assert.equal(TOOLS.length, 14);
   assert.ok(TOOLS.some((tool) => tool.name === "schoology_read_document"));
   assert.ok(TOOLS.some((tool) => tool.name === "studentvue_get_grades"));
 });
@@ -41,7 +41,7 @@ async function listTools(options) {
 
 test("completes an MCP handshake and lists FCPS tools plus the login check", async () => {
   const tools = await listTools();
-  assert.equal(tools.length, 12);
+  assert.equal(tools.length, 15);
   assert.ok(tools.some((tool) => tool.name === "studentvue_get_assignments"));
   assert.ok(tools.some((tool) => tool.name === "school_check_login"));
   assert.ok(!tools.some((tool) => tool.name.startsWith("ion_")));
@@ -49,7 +49,7 @@ test("completes an MCP handshake and lists FCPS tools plus the login check", asy
 
 test("lists Ion tools only when Ion is configured", async () => {
   const tools = await listTools({ ion: true });
-  assert.equal(tools.length, 20);
+  assert.equal(tools.length, 23);
   assert.ok(tools.some((tool) => tool.name === "ion_get_block_activities"));
 });
 
@@ -242,12 +242,12 @@ test("serves the complete tool list over authenticated Streamable HTTP", async (
 
     const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     assert.equal(listed.status, 200);
-    assert.equal((await readMcpResponse(listed)).result.tools.length, 12);
+    assert.equal((await readMcpResponse(listed)).result.tools.length, 15);
 
     process.env.ION_USERNAME = "2029student";
     process.env.ION_PASSWORD = ["ion", "test", "only"].join("-");
     const withIon = await post({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
-    assert.equal((await readMcpResponse(withIon)).result.tools.length, 20);
+    assert.equal((await readMcpResponse(withIon)).result.tools.length, 23);
   } finally {
     delete process.env.ION_USERNAME;
     delete process.env.ION_PASSWORD;
