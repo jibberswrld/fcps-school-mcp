@@ -104,3 +104,80 @@ test("a hidden Grade Book fails fast without re-login and leaves Schoology secti
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Schoology materials include later pages and make nested PDFs readable", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/v1/users/me") return Response.json({ uid: 42 });
+    if (url.pathname === "/v1/sections/7/folders") return Response.json({ folders: [{ id: 8, title: "Unit 3", parent_id: "0" }] });
+    if (url.pathname === "/v1/courses/7/folder/0") return Response.json({ "folder-item": [{ id: 1, type: "assignment" }] });
+    if (url.pathname.startsWith("/v1/courses/7/folder/") || url.pathname.endsWith("/discussions")) return Response.json({});
+    const key = { documents: "document", pages: "page", assignments: "assignment" }[url.pathname.split("/").at(-1)];
+    assert.ok(key, `Unexpected request: ${url}`);
+    if (key === "assignment") assert.equal(url.searchParams.get("with_attachments"), "1");
+    if (!url.searchParams.has("start")) {
+      url.searchParams.set("start", "20");
+      url.searchParams.set("limit", "20");
+      return Response.json({ [key]: [{ id: 1, title: "First item" }], links: { next: url.href } });
+    }
+    const item = { id: 2, title: key === "document" ? "Unit 3.3 Slides.pdf" : "Later item", course_fid: 8 };
+    if (key === "document") item.attachments = { files: { file: [{ title: item.title, extension: "pdf" }] } };
+    return Response.json({ [key]: [item], links: { self: url.href } });
+  });
+
+  const [content] = await callTool("schoology_get_materials", { sectionId: "7" });
+  const { folders, items } = JSON.parse(content.text);
+  assert.deepEqual(folders, [{ id: "8", title: "Unit 3", parentId: null }]);
+  assert.deepEqual(items.map(({ type, id }) => [type, id]), [
+    ["document", "1"], ["document", "2"], ["page", "1"], ["page", "2"], ["assignment", "1"], ["assignment", "2"],
+  ]);
+  const slides = items[1];
+  assert.equal(slides.folderId, "8");
+  assert.equal(slides.files[0].title, "Unit 3.3 Slides.pdf");
+  assert.deepEqual(slides.readWith, { tool: "schoology_read_document", sectionId: "7", documentId: "2", materialType: "document" });
+});
+
+test("Schoology material search finds page attachments and folder paths beyond 60 folders", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/v1/users/me") return Response.json({ uid: 42 });
+    if (url.pathname === "/v1/sections/7/folders") {
+      if (url.searchParams.has("start")) return Response.json({ folders: [
+        { id: 71, title: "Unit 3", parent_id: "0" },
+        { id: 72, title: "3.3 Europe", parent_id: "71" },
+      ] });
+      const folders = Array.from({ length: 60 }, (_, i) => ({ id: i + 10, title: `Earlier folder ${i}`, parent_id: "0" }));
+      url.searchParams.set("start", "60");
+      return Response.json({ folders, links: { next: url.href } });
+    }
+    if (url.pathname === "/v1/courses/7/folder/72") return Response.json({ "folder-item": [{ id: 103, type: "assessment_v2" }] });
+    if (url.pathname.endsWith("/assignments")) return Response.json({
+      assignment: [{ id: 103, title: "Exit ticket", web_url: "https://lms.fcps.edu/assignment/103" }],
+    });
+    if (url.pathname.endsWith("/discussions")) return Response.json({ discussion: [{ id: 104, title: "Exit discussion", folder_id: 72, body: "<p>Respond to the prompt.</p>" }] });
+    if (url.pathname.endsWith("/pages")) {
+      assert.equal(url.searchParams.get("with_attachments"), "1");
+      return Response.json({ page: [
+        { id: 100, title: "Lesson agenda", folder_id: 72, body: "<p>Read the handout.</p>", attachments: { files: { file: [{ title: "Europe_Slides.pdf", extension: "pdf" }] } } },
+        { id: 101, title: "3.30 slides" },
+        ...Array.from({ length: 30 }, (_, i) => ({ id: 200 + i, title: `Extra slides ${i}`, folder_id: 72 })),
+      ] });
+    }
+    return Response.json({});
+  });
+
+  const [listing] = await callTool("schoology_get_materials", { sectionId: "7", query: "slides 3.3" });
+  const result = JSON.parse(listing.text);
+  assert.equal(result.totalMatches, 31);
+  assert.equal(result.items.length, 30);
+  assert.deepEqual(result.items[0].folderPath, ["Unit 3", "3.3 Europe"]);
+  assert.deepEqual(result.items[0].readWith, { tool: "schoology_read_document", sectionId: "7", documentId: "100", materialType: "page" });
+  const { tool, ...args } = result.nextSearchWith;
+  const [continuation] = await callTool(tool, args);
+  assert.deepEqual(JSON.parse(continuation.text).items.map(({ id }) => id), ["229"]);
+  const [exit] = await callTool("schoology_get_materials", { sectionId: "7", query: "3.3 exit" });
+  const [assessment, discussion] = JSON.parse(exit.text).items;
+  assert.equal(assessment.folderId, "72");
+  assert.match(assessment.webUrl, /\/assessments\/103$/);
+  assert.equal(discussion.readWith.materialType, "discussion");
+});

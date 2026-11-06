@@ -7,7 +7,7 @@ import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { downloadAttachment, readAttachment } from "../src/documents.js";
-import { validateToolCall } from "../src/fcps.js";
+import { callTool, validateToolCall } from "../src/fcps.js";
 import { createServer } from "../src/server.js";
 
 // A tiny, real PDF containing text, a vector diagram, and an optional scanned
@@ -170,4 +170,54 @@ test("MCP returns labeled images, exact continuations, and per-file errors for a
   assert.equal(invalid.isError, true);
   assert.match(invalid.content[0].text, /fileIndex exceeds/);
   assert.ok(paths.includes("/v1/sections/1/assignments/2"));
+});
+
+test("MCP opens an inline Schoology page and its PDF attachments", async (t) => {
+  const itemRequests = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/v1/users/me") return Response.json({ uid: "1" });
+    if (url.pathname.endsWith("/2")) itemRequests.push(url.pathname);
+    if (url.pathname === "/v1/sections/1/documents/2") return Response.json({ title: "Lesson" });
+    if (url.pathname === "/v1/sections/1/assignments/2") return new Response(null, { status: 403 });
+    if (url.pathname === "/v1/sections/1/pages/2") {
+      assert.equal(url.searchParams.get("with_attachments"), "1");
+      return Response.json({
+        title: "Lesson",
+        body: '<p>Read the handout.</p><a href="/course/1/materials/gp/7">Course handout</a>',
+        attachments: { files: { file: [{ title: "worksheet.pdf", download_path: "/attachment/10/source/worksheet.pdf" }] } },
+      });
+    }
+    if (url.pathname === "/attachment/10/docviewer") return new Response('<a href="https://files-cdn.schoology.com/worksheet.pdf">PDF</a>');
+    if (url.hostname === "files-cdn.schoology.com") return new Response(pdfFixture());
+    assert.fail(`Unexpected request: ${url}`);
+  });
+
+  const content = await callTool("schoology_read_document", { sectionId: "1", documentId: "2", materialType: "page", pageCount: 1 });
+  const result = JSON.parse(content[0].text);
+  assert.equal(result.type, "page");
+  assert.match(result.text, /Read the handout/);
+  assert.equal(result.files[0].title, "worksheet.pdf");
+  assert.equal(result.files[0].nextReadWith.materialType, "page");
+  assert.deepEqual(result.links, [{ title: "Course handout", url: "https://lms.fcps.edu/course/1/materials/gp/7" }]);
+  assert.equal(content.filter((block) => block.type === "image").length, 1);
+  assert.deepEqual(itemRequests, ["/v1/sections/1/pages/2"]);
+  const [withoutType] = await callTool("schoology_read_document", { sectionId: "1", documentId: "2", includeImages: false });
+  assert.equal(JSON.parse(withoutType.text).type, "page");
+});
+
+test("MCP returns a browser link for an embedded external tool without launching it", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const { pathname } = new URL(input);
+    if (pathname === "/v1/users/me") return Response.json({ uid: "1" });
+    assert.equal(pathname, "/v1/sections/1/documents/3");
+    return Response.json({
+      title: "External resource",
+      attachments: { external_tools: { external_tool: [{ id: 4, title: "Interactive lesson" }] } },
+    });
+  });
+  const [content] = await callTool("schoology_read_document", { sectionId: "1", documentId: "3", materialType: "document" });
+  assert.deepEqual(JSON.parse(content.text).links, [
+    { title: "Interactive lesson", url: "https://lms.fcps.edu/external_tool/4/launch", type: "external_tool" },
+  ]);
 });
