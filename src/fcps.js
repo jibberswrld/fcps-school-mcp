@@ -513,10 +513,13 @@ async function getMaterials({ sectionId, query, offset }) {
       const folderId = row.course_fid ?? row.folder_id ?? location?.folderId;
       const files = fileOf(row);
       const links = materialLinks(row);
+      const webUrl = location?.type === "assessment_v2" || row.type === "assessment_v2"
+        ? materialWebUrl("assessment_v2", sectionId, id)
+        : materialUrl(row.web_url)?.href ?? materialWebUrl(type, sectionId, id);
       items.push({
         type, id, title: row.title, folderId: folderId && String(folderId) !== "0" ? String(folderId) : null, files,
         ...(links.length ? { links } : {}),
-        webUrl: materialUrl(row.web_url)?.href ?? materialWebUrl(location?.type === "assessment_v2" ? location.type : type, sectionId, id),
+        webUrl,
         ...(files.length || links.length || row.body || row.description ? {
           readWith: { tool: "schoology_read_document", sectionId, documentId: id, materialType: type },
         } : {}),
@@ -572,7 +575,9 @@ async function readDocument(sectionId, contentId, options) {
   if (!content) throw new Error(`Could not find accessible Schoology material ${contentId} in section ${sectionId}.`);
 
   const readWith = { tool: "schoology_read_document", sectionId, documentId: String(contentId), materialType: contentType };
-  const webUrl = materialUrl(content.web_url)?.href ?? materialWebUrl(content.type === "assessment_v2" ? content.type : contentType, sectionId, contentId);
+  const webUrl = content.type === "assessment_v2"
+    ? materialWebUrl(content.type, sectionId, contentId)
+    : materialUrl(content.web_url)?.href ?? materialWebUrl(contentType, sectionId, contentId);
   const files = content?.attachments?.files?.file ?? [];
   if (!files.length && !links.length && !body) throw new Error(`This ${contentType} has no readable text, links, or downloadable attachments.`);
 

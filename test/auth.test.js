@@ -151,7 +151,9 @@ test("Schoology material search finds page attachments and folder paths beyond 6
       return Response.json({ folders, links: { next: url.href } });
     }
     if (url.pathname === "/v1/courses/7/folder/72") return Response.json({ "folder-item": [{ id: 103, type: "assessment_v2" }] });
-    if (url.pathname.endsWith("/assignments")) return Response.json({ assignment: [{ id: 103, title: "Exit ticket" }] });
+    if (url.pathname.endsWith("/assignments")) return Response.json({
+      assignment: [{ id: 103, title: "Exit ticket", web_url: "https://lms.fcps.edu/assignment/103" }],
+    });
     if (url.pathname.endsWith("/discussions")) return Response.json({ discussion: [{ id: 104, title: "Exit discussion", folder_id: 72, body: "<p>Respond to the prompt.</p>" }] });
     if (url.pathname.endsWith("/pages")) {
       assert.equal(url.searchParams.get("with_attachments"), "1");
