@@ -8,6 +8,7 @@ import { downloadAttachment, readAttachment, readAttachmentResponse } from "./do
 // host so MCP tool arguments cannot turn it into a general-purpose HTTP proxy.
 
 const BASE = "https://lms.fcps.edu";
+const MATERIAL_TYPES = ["document", "assignment", "page", "discussion"];
 const STUDENTVUE_BASE = "https://sisstudent.fcps.edu/svue";
 const STUDENTVUE_SSO = "https://sis.fcps.edu/SIS/samlssoportal.aspx?whr=edupoint-idp-prod";
 const FR = "https://aic.fcps.edu";
@@ -73,8 +74,10 @@ export function authState() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function decodeEntities(s) {
   return String(s)
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (entity, hex, decimal) => {
+      const code = hex ? parseInt(hex, 16) : Number(decimal);
+      return code <= 0x10FFFF ? String.fromCodePoint(code) : entity;
+    })
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 }
 function cookieHeader(url) {
@@ -331,7 +334,7 @@ const isoDate = (d) => d.toISOString().slice(0, 10);
 
 // ---- tool implementations (live) ----
 async function getProfile() { const p = await json("/v1/users/me"); return { uid: String(p.uid), name: p.name_display, username: p.username, schoolId: p.school_id, email: p.primary_email, timezone: p.tz_name }; }
-async function getSections() { const d = await json(`/v1/users/${await uid()}/sections`); return (d.section ?? []).map((s) => ({ id: String(s.id), title: s.section_title, courseTitle: s.course_title, courseId: String(s.course_id) })); }
+async function getSections() { const sections = await getCollection(`/v1/users/${await uid()}/sections`, "section"); return sections.map((s) => ({ id: String(s.id), title: s.section_title, courseTitle: s.course_title, courseId: String(s.course_id) })); }
 async function getUpcoming(days = 30) {
   const start = isoDate(new Date()), end = isoDate(new Date(Date.now() + days * 86400000));
   const d = await json(`/v1/users/${await uid()}/events?start_date=${start}&end_date=${end}`);
@@ -375,8 +378,8 @@ async function getAssignments(sectionId) {
   const targets = sectionId ? [{ id: sectionId }] : await getSections();
   const out = [];
   for (const t of targets) {
-    const d = await json(`/v1/sections/${t.id}/assignments?with_attachments=1`);
-    for (const a of (d.assignment ?? [])) {
+    const assignments = await getCollection(`/v1/sections/${t.id}/assignments?with_attachments=1`, "assignment");
+    for (const a of assignments) {
       const files = (a?.attachments?.files?.file ?? []).map((f) => ({ title: f.title, ext: (f.extension ?? "").toLowerCase(), mime: f.filemime, size: f.filesize != null ? Number(f.filesize) : undefined }));
       const externalTools = (a?.attachments?.external_tools?.external_tool ?? []).map((tool) => ({ id: String(tool.id), title: tool.title }));
       const type = a.type ?? "assignment";
@@ -406,13 +409,7 @@ async function getAssignments(sectionId) {
   });
   return out;
 }
-function parseFolderLinks(html) {
-  const out = [], seen = new Set();
-  const re = /href="[^"]*materials\?(?:[^"']*?&(?:amp;)?)?f=(\d+)"[^>]*>([\s\S]{0,160}?)<\/a>/g; let m;
-  while ((m = re.exec(html))) { const id = m[1]; const title = decodeEntities(m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()); if (title && !seen.has(id)) { seen.add(id); out.push({ id, title }); } }
-  return out;
-}
-async function getMaterialPages(path, key) {
+async function getCollection(path, key) {
   const first = new URL(path, BASE);
   const seen = new Set();
   const items = [];
@@ -429,60 +426,155 @@ async function getMaterialPages(path, key) {
   return items;
 }
 
-async function getMaterials(sectionId) {
-  const folders = new Map();
-  const assignmentFolders = new Map();
-  const root = (await apiFetch(`/course/${sectionId}/materials`)).body;
-  const q = [];
-  for (const f of parseFolderLinks(root)) { folders.set(f.id, { id: f.id, title: f.title, parentId: null }); q.push(f.id); }
-  let guard = 0;
-  while (q.length && guard++ < 60) {
-    const fid = q.shift();
-    const html = (await apiFetch(`/course/${sectionId}/materials?f=${fid}`)).body;
-    for (const match of html.matchAll(/href=["'][^"']*\/assignment\/(\d+)[^"']*["']/gi)) {
-      assignmentFolders.set(match[1], fid);
-    }
-    for (const sf of parseFolderLinks(html)) if (!folders.has(sf.id)) { folders.set(sf.id, { id: sf.id, title: sf.title, parentId: fid }); q.push(sf.id); }
+function materialText(html) {
+  return decodeEntities(String(html ?? "")
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\b[^>]*>|<\/(?:p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, ""))
+    .replace(/&nbsp;/gi, " ").replace(/[^\S\n]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function materialUrl(href) {
+  const url = URL.parse(decodeEntities(href ?? ""), BASE);
+  return href && url && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url : null;
+}
+
+function materialWebUrl(type, sectionId, id) {
+  if (type === "page") return `${BASE}/page/${id}`;
+  if (type === "discussion") return `${BASE}/discussion/${id}`;
+  if (type === "assessment_v2") return `${BASE}/course/${sectionId}/assessments/${id}`;
+  if (type === "assignment") return `${BASE}/assignment/${id}`;
+  return `${BASE}/course/${sectionId}/materials/gp/${id}`;
+}
+
+function materialLinks(content) {
+  const links = new Map();
+  for (const { url: href, title } of content.attachments?.links?.link ?? []) {
+    const url = materialUrl(href);
+    if (url) links.set(url.href, { title: title || url.hostname, url: url.href });
   }
+  for (const { id, title } of content.attachments?.external_tools?.external_tool ?? []) {
+    if (!/^\d+$/.test(String(id))) continue;
+    const url = `${BASE}/external_tool/${id}/launch`;
+    links.set(url, { title: title || content.title, url, type: "external_tool" });
+  }
+  for (const [, , href, label] of String(content.body ?? content.description ?? "").matchAll(/<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi)) {
+    if (href.startsWith("#")) continue;
+    const url = materialUrl(href);
+    if (url && !links.has(url.href)) links.set(url.href, { title: materialText(label) || url.hostname, url: url.href });
+  }
+  return [...links.values()];
+}
+
+async function getAssignmentFolders(sectionId, folders, assignments) {
+  const pending = new Set(assignments.filter((item) => item.course_fid == null && item.folder_id == null).map((item) => String(item.id)));
+  const locations = new Map();
+  const folderWarnings = [];
+  if (pending.size) await mapLimit(["0", ...folders.keys()], 8, async (id) => {
+    if (!pending.size) return;
+    const { status, body } = await apiFetch(`/v1/courses/${sectionId}/folder/${id}`);
+    const folderId = id === "0" ? null : id;
+    if (status < 200 || status >= 300) {
+      folderWarnings.push({ folderId, status });
+      return;
+    }
+    for (const row of JSON.parse(body)["folder-item"] ?? []) {
+      const assignmentId = String(row.id);
+      if (pending.delete(assignmentId)) locations.set(assignmentId, { folderId, type: row.type });
+    }
+  });
+  return { locations, folderWarnings };
+}
+
+function materialTerms(text) {
+  return text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().match(/\d+(?:\.\d+)+|[\p{L}\p{N}]+/gu) ?? [];
+}
+
+async function getMaterials({ sectionId, query, offset }) {
+  const section = `/v1/sections/${sectionId}`;
+  const [folderRows, documents, pages, assignments, discussions] = await Promise.all([
+    getCollection(`${section}/folders?limit=100`, "folders"),
+    getCollection(`${section}/documents?limit=100`, "document"),
+    getCollection(`${section}/pages?with_attachments=1&limit=100`, "page"),
+    getCollection(`${section}/assignments?with_attachments=1&limit=100`, "assignment"),
+    getCollection(`${section}/discussions?with_attachments=1&limit=100`, "discussion"),
+  ]);
+  const folders = new Map(folderRows.map((row) => {
+    const id = String(row.id);
+    return [id, { id, title: row.title, parentId: row.parent_id && String(row.parent_id) !== "0" ? String(row.parent_id) : null }];
+  }));
+  const { locations, folderWarnings } = await getAssignmentFolders(sectionId, folders, assignments);
   const items = [];
   const fileOf = (r) => (r?.attachments?.files?.file ?? []).map((f) => ({ title: f.title, ext: (f.extension ?? "").toLowerCase(), mime: f.filemime, downloadPath: f.download_path, pdfPath: f.converted_download_path }));
-  for (const d of await getMaterialPages(`/v1/sections/${sectionId}/documents`, "document")) {
-    const files = fileOf(d);
-    items.push({
-      type: "document", id: String(d.id), title: d.title,
-      folderId: d.course_fid != null ? String(d.course_fid) : null, files,
-      ...(files.length ? { readWith: { tool: "schoology_read_document", sectionId, documentId: String(d.id) } } : {}),
-    });
+  for (const [type, rows] of [["document", documents], ["page", pages], ["assignment", assignments], ["discussion", discussions]]) {
+    for (const row of rows) {
+      const id = String(row.id);
+      const location = type === "assignment" ? locations.get(id) : undefined;
+      const folderId = row.course_fid ?? row.folder_id ?? location?.folderId;
+      const files = fileOf(row);
+      const links = materialLinks(row);
+      items.push({
+        type, id, title: row.title, folderId: folderId && String(folderId) !== "0" ? String(folderId) : null, files,
+        ...(links.length ? { links } : {}),
+        webUrl: materialUrl(row.web_url)?.href ?? materialWebUrl(location?.type === "assessment_v2" ? location.type : type, sectionId, id),
+        ...(files.length || links.length || row.body || row.description ? {
+          readWith: { tool: "schoology_read_document", sectionId, documentId: id, materialType: type },
+        } : {}),
+      });
+    }
   }
-  for (const p of await getMaterialPages(`/v1/sections/${sectionId}/pages`, "page")) items.push({ type: "page", id: String(p.id), title: p.title, folderId: p.course_fid != null ? String(p.course_fid) : null, files: fileOf(p) });
-  for (const a of await getMaterialPages(`/v1/sections/${sectionId}/assignments?with_attachments=1`, "assignment")) {
-    const files = fileOf(a);
-    items.push({
-      type: "assignment", id: String(a.id), title: a.title,
-      folderId: a.course_fid != null ? String(a.course_fid) : assignmentFolders.get(String(a.id)) ?? null, files,
-      ...(files.length ? { readWith: { tool: "schoology_read_document", sectionId, documentId: String(a.id) } } : {}),
-    });
+  const warnings = folderWarnings.length ? { folderWarnings } : {};
+  if (!query) return { sectionId, folders: [...folders.values()], items, ...warnings };
+
+  const terms = materialTerms(query);
+  const matches = [];
+  for (const item of items) {
+    const path = new Map();
+    for (let folder = folders.get(item.folderId); folder && !path.has(folder.id); folder = folders.get(folder.parentId)) path.set(folder.id, folder);
+    const ancestors = [...path.values()].reverse();
+    const ownTerms = materialTerms([item.title, ...item.files.map((file) => file.title), ...(item.links ?? []).map((link) => link.title)].join(" "));
+    const folderPath = ancestors.map((folder) => folder.title);
+    const pathTerms = materialTerms(folderPath.join(" "));
+    const hasTerm = (words, term) => words.some((word) => term.includes(".") ? word === term : word.startsWith(term));
+    const score = terms.filter((term) => hasTerm(ownTerms, term)).length;
+    if (terms.every((term) => hasTerm(ownTerms, term) || hasTerm(pathTerms, term))) {
+      matches.push({ item: { ...item, folderPath }, ancestors, score });
+    }
   }
-  return { sectionId, folders: [...folders.values()], items };
+  matches.sort((a, b) => b.score - a.score);
+  const selected = matches.slice(offset, offset + 30);
+  const next = offset + selected.length;
+  return {
+    sectionId, query, totalMatches: matches.length,
+    folders: [...new Map(selected.flatMap(({ ancestors }) => ancestors.map((folder) => [folder.id, folder]))).values()],
+    items: selected.map(({ item }) => item), ...warnings,
+    ...(next < matches.length ? { nextSearchWith: { tool: "schoology_get_materials", sectionId, query, offset: next } } : {}),
+  };
 }
 
 async function readDocument(sectionId, contentId, options) {
-  const documentResponse = await apiFetch(`/v1/sections/${sectionId}/documents/${contentId}`);
-  let contentType = "document";
-  let content;
-  if (documentResponse.status >= 200 && documentResponse.status < 300) {
-    content = JSON.parse(documentResponse.body);
-  } else {
-    const assignmentResponse = await apiFetch(`/v1/sections/${sectionId}/assignments/${contentId}?with_attachments=1`);
-    if (assignmentResponse.status < 200 || assignmentResponse.status >= 300) {
-      throw new Error(`Could not find document or assignment ${contentId} in section ${sectionId}.`);
+  let contentType, content, links, body;
+  const types = options.materialType ? [options.materialType] : MATERIAL_TYPES;
+  for (const type of types) {
+    const path = `/v1/sections/${sectionId}/${type}s/${contentId}`;
+    const response = await apiFetch(type === "document" ? path : `${path}?with_attachments=1`);
+    if (response.status >= 200 && response.status < 300) {
+      contentType = type;
+      content = JSON.parse(response.body);
+      links = materialLinks(content);
+      body = materialText(content.body ?? content.description);
+      // A page ID can also resolve as a document without the page's content.
+      if (content.attachments?.files?.file?.length || links.length || body) break;
+      continue;
     }
-    contentType = "assignment";
-    content = JSON.parse(assignmentResponse.body);
+    if (![403, 404].includes(response.status)) throw new Error(`Schoology returned HTTP ${response.status} while opening ${type} ${contentId}.`);
   }
+  if (!content) throw new Error(`Could not find accessible Schoology material ${contentId} in section ${sectionId}.`);
 
+  const readWith = { tool: "schoology_read_document", sectionId, documentId: String(contentId), materialType: contentType };
+  const webUrl = materialUrl(content.web_url)?.href ?? materialWebUrl(content.type === "assessment_v2" ? content.type : contentType, sectionId, contentId);
   const files = content?.attachments?.files?.file ?? [];
-  if (!files.length) throw new Error(`This ${contentType} has no downloadable file attachment.`);
+  if (!files.length && !links.length && !body) throw new Error(`This ${contentType} has no readable text, links, or downloadable attachments.`);
 
   if (options.fileIndex != null && options.fileIndex >= files.length) throw new Error(`fileIndex exceeds this item's ${files.length} attachments.`);
   const extracted = [];
@@ -520,23 +612,26 @@ async function readDocument(sectionId, contentId, options) {
       extracted.push({
         fileIndex, title: file.title, chars: result.text.length, text: result.text,
         totalPages: result.totalPages, renderedPages, textTruncated: result.textTruncated,
-        readWith: { tool: "schoology_read_document", sectionId, documentId: String(contentId), fileIndex },
+        readWith: { ...readWith, fileIndex },
         ...(result.warnings ? { warnings: result.warnings } : {}),
         ...(!result.text ? { note: "No text layer. Inspect the returned image content to read the scan, picture, or diagram." } : {}),
-        ...(nextPage ? { nextReadWith: { tool: "schoology_read_document", sectionId, documentId: String(contentId), fileIndex, startPage: nextPage, pageCount: options.pageCount, includeImages: options.includeImages } } : {}),
+        ...(nextPage ? { nextReadWith: { ...readWith, fileIndex, startPage: nextPage, pageCount: options.pageCount, includeImages: options.includeImages } } : {}),
       });
     } catch (error) {
       extracted.push({ fileIndex, title: file.title, chars: 0, text: "", error: String(error.message).replace(/https?:\/\/\S+/g, "[URL]") });
     }
   }
-  if (extracted.every((file) => file.error)) throw new Error(extracted.map((file) => `${file.title}: ${file.error}`).join("; "));
-  const combinedText = extracted.map((file) => `# ${file.title}\n\n${file.error ? `Error: ${file.error}` : file.text}`).join("\n\n");
+  if (extracted.length && extracted.every((file) => file.error) && (options.fileIndex != null || (!body && !links.length))) {
+    throw new Error(`${extracted.map((file) => `${file.title}: ${file.error}`).join("; ")} Open the material in Schoology at ${webUrl}.`);
+  }
+  const combinedText = [options.fileIndex == null ? body : "", ...extracted.map((file) => `# ${file.title}\n\n${file.error ? `Error: ${file.error}` : file.text}`)].filter(Boolean).join("\n\n");
   const text = combinedText.slice(0, 45000);
   return [{ type: "text", text: JSON.stringify({
-    documentId: String(contentId), type: contentType, title: content.title,
+    documentId: String(contentId), type: contentType, title: content.title, webUrl,
     files: extracted.map(({ text, ...metadata }) => metadata), chars: text.length, text,
+    ...(links.length ? { links } : {}),
     textTruncated: combinedText.length > text.length || extracted.some((file) => file.textTruncated),
-    visualNote: options.includeImages ? "Images follow this metadata in attachment/page order. Read diagrams, charts, equations, tables, and scans visually. Follow each file's nextReadWith for remaining pages or attachments." : "Images disabled. Text extraction cannot describe diagrams or scans; use includeImages=true to inspect them.",
+    ...(files.length ? { visualNote: options.includeImages ? "Images follow this metadata in attachment/page order. Read diagrams, charts, equations, tables, and scans visually. Follow each file's nextReadWith for remaining pages or attachments." : "Images disabled. Text extraction cannot describe diagrams or scans; use includeImages=true to inspect them." } : {}),
   }, null, 2) }, ...visuals];
 }
 
@@ -874,9 +969,14 @@ export const TOOLS = [
   { name: "schoology_get_profile", description: "Get the signed-in student's Schoology profile.", inputSchema: emptySchema },
   { name: "schoology_list_sections", description: "List enrolled Schoology sections with official StudentVUE course grades.", inputSchema: emptySchema },
   { name: "schoology_get_assignments", description: "List Schoology assignments with submission status (submitted, not submitted, or unknown), attachments, and matched StudentVUE scores.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty } } },
-  { name: "schoology_get_materials", description: "List a course's nested folders, documents, pages, and assignments.", inputSchema: { type: "object", additionalProperties: false, properties: { sectionId: idProperty }, required: ["sectionId"] } },
-  { name: "schoology_read_document", description: "Read Schoology documents and assignment attachments as text plus actual page images. Preserves diagrams, charts, equations, tables, photos, and scanned pages. Returns up to 3 images per call with nextReadWith for remaining pages/files. Supports PDFs, converted DOCX/PPTX, and image attachments.", inputSchema: { type: "object", additionalProperties: false, properties: {
+  { name: "schoology_get_materials", description: "Find files, links, pages, assignments, and discussion prompts across all folders in a Schoology course. For a specific resource, pass a short query such as '3.3 slides' to search titles, filenames, links, and folder paths. Use readWith to open a match and nextSearchWith for more matches. Omit query to list the course.", inputSchema: { type: "object", additionalProperties: false, properties: {
+    sectionId: idProperty,
+    query: { type: "string", maxLength: 200 },
+    offset: { type: "integer", minimum: 0, description: "Pass the offset from nextSearchWith to get the next batch of matches." },
+  }, required: ["sectionId"] } },
+  { name: "schoology_read_document", description: "Open Schoology course material using its readWith arguments. Returns inline text, links, and up to 3 images per call from PDF, converted Office, and image attachments. External tools are returned as browser links. Follow nextReadWith for remaining pages or files.", inputSchema: { type: "object", additionalProperties: false, properties: {
     sectionId: idProperty, documentId: idProperty,
+    materialType: { type: "string", enum: MATERIAL_TYPES, description: "The item type supplied by readWith." },
     fileIndex: { type: "integer", minimum: 0, maximum: 999, description: "Optional zero-based attachment index; omit to read all attachments." },
     startPage: { type: "integer", minimum: 1, maximum: 10000, default: 1, description: "First page to show. Later pages also focus the text on the requested range." },
     pageCount: { type: "integer", minimum: 1, maximum: 3, default: 3, description: "Maximum page images across all attachments in this response." },
@@ -935,14 +1035,22 @@ export function validateToolCall(name, value = {}) {
     return { sectionId: optionalId(value.sectionId, "sectionId") };
   }
   if (name === "schoology_get_materials") {
-    onlyKeys(value, ["sectionId"]);
-    return { sectionId: requireId(value.sectionId, "sectionId") };
+    onlyKeys(value, ["sectionId", "query", "offset"]);
+    const sectionId = requireId(value.sectionId, "sectionId");
+    if (value.query == null && value.offset == null) return { sectionId };
+    if (typeof value.query !== "string" || value.query.length > 200 || !materialTerms(value.query).length) {
+      throw new Error("query must contain a search term and be at most 200 characters.");
+    }
+    const offset = value.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer.");
+    return { sectionId, query: value.query.trim(), offset };
   }
   if (name === "schoology_read_document") {
-    onlyKeys(value, ["sectionId", "documentId", "fileIndex", "startPage", "pageCount", "includeImages"]);
-    const { fileIndex } = value;
+    onlyKeys(value, ["sectionId", "documentId", "materialType", "fileIndex", "startPage", "pageCount", "includeImages"]);
+    const { fileIndex, materialType } = value;
+    if (materialType != null && !MATERIAL_TYPES.includes(materialType)) throw new Error(`materialType must be one of ${MATERIAL_TYPES.join(", ")}.`);
     if (fileIndex != null && (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex > 999)) throw new Error("fileIndex must be an integer from 0 to 999.");
-    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId"), fileIndex, ...pagingOptions(value) };
+    return { sectionId: requireId(value.sectionId, "sectionId"), documentId: requireId(value.documentId, "documentId"), ...(materialType ? { materialType } : {}), fileIndex, ...pagingOptions(value) };
   }
   if (name === "studentvue_read_document") {
     onlyKeys(value, ["documentId", "startPage", "pageCount", "includeImages"]);
@@ -984,7 +1092,7 @@ export async function callTool(name, value = {}) {
   if (name === "schoology_get_profile") data = await getProfile();
   else if (name === "schoology_list_sections") data = await getSectionsWithGrades();
   else if (name === "schoology_get_assignments") data = await getAssignmentsWithGrades(args.sectionId);
-  else if (name === "schoology_get_materials") data = await getMaterials(args.sectionId);
+  else if (name === "schoology_get_materials") data = await getMaterials(args);
   else if (name === "schoology_read_document") return readDocument(args.sectionId, args.documentId, args);
   else if (name === "schoology_get_upcoming_events") data = await getUpcoming(args.days);
   else if (name === "schoology_get_calendar") data = await getCalendar(args.start, args.end);

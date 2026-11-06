@@ -63,8 +63,8 @@ That is the entire local setup. You do not need a Schoology developer key, Supab
 | `schoology_get_profile` | Signed-in Schoology profile |
 | `schoology_list_sections` | Courses with official StudentVUE grades |
 | `schoology_get_assignments` | Assignments, submission status, attachments, and matched scores |
-| `schoology_get_materials` | Course folders, pages, files, and assignments |
-| `schoology_read_document` | Text plus page images from documents and assignment attachments |
+| `schoology_get_materials` | List course materials or search titles, filenames, links, and folder paths |
+| `schoology_read_document` | Read files, pages, assignments, and discussion prompts, including PDF page images |
 | `schoology_get_upcoming_events` | Upcoming deadlines and events |
 | `schoology_get_calendar` | Calendar events between two dates |
 | `schoology_get_recent_activity` | Account-wide announcements and updates |
@@ -143,6 +143,10 @@ Fully quit and reopen the MCP client. If your client was not detected, use the m
 **A tool says a login failed or is paused**
 
 Ask your assistant to run `school_check_login`. It tries Schoology, StudentVUE, and Ion and returns the exact reason for each failure, for example the message FCPS returned. A pause means FCPS or Ion rejected the password; re-run the setup command with the correct one. The pause is intentional because repeated FCPS login failures can lock an account.
+
+**Finding a specific course resource**
+
+Use `schoology_get_materials` with a section ID and a short `query` such as `"unit 3 slides"`. Matches include their folder paths. Use `readWith` to open a match and `nextSearchWith` to continue a long result list. External tools are returned as browser links and may require a separate sign-in.
 
 **Reading diagrams, scans, and longer documents**
 
