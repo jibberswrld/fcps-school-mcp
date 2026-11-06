@@ -104,3 +104,36 @@ test("a hidden Grade Book fails fast without re-login and leaves Schoology secti
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Schoology materials include later pages and make nested PDFs readable", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/v1/users/me") return Response.json({ uid: 42 });
+    if (url.pathname === "/course/7/materials") {
+      const html = url.searchParams.has("f") ? "" : '<a href="/course/7/materials?f=8">Unit 3</a>';
+      return new Response(html);
+    }
+    const key = { documents: "document", pages: "page", assignments: "assignment" }[url.pathname.split("/").at(-1)];
+    assert.ok(key, `Unexpected request: ${url}`);
+    if (key === "assignment") assert.equal(url.searchParams.get("with_attachments"), "1");
+    if (!url.searchParams.has("start")) {
+      url.searchParams.set("start", "20");
+      url.searchParams.set("limit", "20");
+      return Response.json({ [key]: [{ id: 1, title: "First item" }], links: { next: url.href } });
+    }
+    const item = { id: 2, title: key === "document" ? "Unit 3.3 Slides.pdf" : "Later item", course_fid: 8 };
+    if (key === "document") item.attachments = { files: { file: [{ title: item.title, extension: "pdf" }] } };
+    return Response.json({ [key]: [item], links: { self: url.href } });
+  });
+
+  const [content] = await callTool("schoology_get_materials", { sectionId: "7" });
+  const { folders, items } = JSON.parse(content.text);
+  assert.deepEqual(folders, [{ id: "8", title: "Unit 3", parentId: null }]);
+  assert.deepEqual(items.map(({ type, id }) => [type, id]), [
+    ["document", "1"], ["document", "2"], ["page", "1"], ["page", "2"], ["assignment", "1"], ["assignment", "2"],
+  ]);
+  const slides = items[1];
+  assert.equal(slides.folderId, "8");
+  assert.equal(slides.files[0].title, "Unit 3.3 Slides.pdf");
+  assert.deepEqual(slides.readWith, { tool: "schoology_read_document", sectionId: "7", documentId: "2" });
+});

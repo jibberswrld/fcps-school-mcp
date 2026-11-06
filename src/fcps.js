@@ -412,6 +412,23 @@ function parseFolderLinks(html) {
   while ((m = re.exec(html))) { const id = m[1]; const title = decodeEntities(m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()); if (title && !seen.has(id)) { seen.add(id); out.push({ id, title }); } }
   return out;
 }
+async function getMaterialPages(path, key) {
+  const first = new URL(path, BASE);
+  const seen = new Set();
+  const items = [];
+  let url = first;
+  while (url) {
+    if (url.origin !== first.origin || url.pathname !== first.pathname || seen.has(url.href)) {
+      throw new Error(`Invalid Schoology pagination link for ${key}.`);
+    }
+    seen.add(url.href);
+    const page = await json(url.pathname + url.search);
+    items.push(...(page[key] ?? []));
+    url = page.links?.next ? new URL(page.links.next, first) : null;
+  }
+  return items;
+}
+
 async function getMaterials(sectionId) {
   const folders = new Map();
   const assignmentFolders = new Map();
@@ -429,9 +446,16 @@ async function getMaterials(sectionId) {
   }
   const items = [];
   const fileOf = (r) => (r?.attachments?.files?.file ?? []).map((f) => ({ title: f.title, ext: (f.extension ?? "").toLowerCase(), mime: f.filemime, downloadPath: f.download_path, pdfPath: f.converted_download_path }));
-  for (const d of ((await json(`/v1/sections/${sectionId}/documents`)).document ?? [])) items.push({ type: "document", id: String(d.id), title: d.title, folderId: d.course_fid != null ? String(d.course_fid) : null, files: fileOf(d) });
-  for (const p of ((await json(`/v1/sections/${sectionId}/pages`)).page ?? [])) items.push({ type: "page", id: String(p.id), title: p.title, folderId: p.course_fid != null ? String(p.course_fid) : null, files: fileOf(p) });
-  for (const a of ((await json(`/v1/sections/${sectionId}/assignments?with_attachments=1`)).assignment ?? [])) {
+  for (const d of await getMaterialPages(`/v1/sections/${sectionId}/documents`, "document")) {
+    const files = fileOf(d);
+    items.push({
+      type: "document", id: String(d.id), title: d.title,
+      folderId: d.course_fid != null ? String(d.course_fid) : null, files,
+      ...(files.length ? { readWith: { tool: "schoology_read_document", sectionId, documentId: String(d.id) } } : {}),
+    });
+  }
+  for (const p of await getMaterialPages(`/v1/sections/${sectionId}/pages`, "page")) items.push({ type: "page", id: String(p.id), title: p.title, folderId: p.course_fid != null ? String(p.course_fid) : null, files: fileOf(p) });
+  for (const a of await getMaterialPages(`/v1/sections/${sectionId}/assignments?with_attachments=1`, "assignment")) {
     const files = fileOf(a);
     items.push({
       type: "assignment", id: String(a.id), title: a.title,
